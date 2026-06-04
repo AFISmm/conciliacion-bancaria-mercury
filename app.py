@@ -266,6 +266,7 @@ def _init():
     if "pending_email"   not in st.session_state: st.session_state.pending_email   = ""
     if "pending_code"    not in st.session_state: st.session_state.pending_code    = ""
     if "code_expiry"     not in st.session_state: st.session_state.code_expiry     = None
+    if "email_sent"      not in st.session_state: st.session_state.email_sent      = False
 
 
 # ── PANTALLA DE AUTENTICACIÓN ─────────────────────────────────────────────
@@ -319,33 +320,47 @@ def _auth_page():
                         st.error(err)
                     else:
                         # Generar y enviar código
-                        code   = _auth.generate_code()
+                        code      = _auth.generate_code()
                         sent, msg = _auth.send_code_email(email.strip().lower(), code)
                         st.session_state.pending_email = email.strip().lower()
                         st.session_state.pending_code  = code
                         st.session_state.code_expiry   = datetime.now() + timedelta(minutes=10)
+                        st.session_state.email_sent    = sent
+                        st.session_state.auth_step     = "verify"
                         save_data(data)
-                        st.session_state.auth_step = "verify"
-                        if sent:
-                            st.success(f"Código enviado a **{email}**. Revise su bandeja de entrada.")
-                        elif msg == "SMTP_NOT_CONFIGURED":
-                            st.warning(f"SMTP no configurado. Código de prueba: **{code}**")
-                        else:
-                            st.warning(f"No se pudo enviar el correo ({msg}). Código de prueba: **{code}**")
                         st.rerun()
 
     # ── PASO 2: Verificar código ────────────────────────────────────────
     elif step == "verify":
-        email = st.session_state.pending_email
-        st.info(f"Se envió un código de verificación a **{email}**")
+        email      = st.session_state.pending_email
+        email_sent = st.session_state.email_sent
+
+        if email_sent:
+            st.success(f"📧 Código enviado a **{email}** — revise su bandeja de entrada (y la carpeta de spam).")
+        else:
+            # SMTP no configurado: mostrar el código directamente en pantalla
+            st.warning("El servidor de correo no está configurado. Use el código que aparece abajo.")
+            st.markdown(
+                f"""
+                <div style="text-align:center;background:#f5f5f5;border-radius:8px;
+                            padding:20px;margin:12px 0;border:2px dashed #2c3e50;">
+                  <p style="margin:0 0 8px;color:#757575;font-size:.85rem;">Su código de verificación:</p>
+                  <span style="font-size:3rem;font-weight:700;letter-spacing:14px;color:#2c3e50;">
+                    {st.session_state.pending_code}
+                  </span>
+                  <p style="margin:8px 0 0;color:#757575;font-size:.78rem;">Válido por 10 minutos</p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
         with st.form("form_verify"):
-            code_input = st.text_input("Código de 6 dígitos", max_chars=6, placeholder="123456")
-            submitted  = st.form_submit_button("Verificar", use_container_width=True, type="primary")
+            code_input = st.text_input("Ingrese el código de 6 dígitos", max_chars=6, placeholder="123456")
+            submitted  = st.form_submit_button("Verificar cuenta", use_container_width=True, type="primary")
 
         if submitted:
             if _auth.code_expired():
-                st.error("El código expiró. Regístrese nuevamente.")
+                st.error("El código expiró. Vuelva al registro.")
                 st.session_state.auth_step = "login"
                 st.rerun()
             elif code_input.strip() != st.session_state.pending_code:
@@ -357,27 +372,20 @@ def _auth_page():
                 st.session_state.auth_step    = "login"
                 st.session_state.pending_code = ""
                 save_data(data)
-                st.success("¡Cuenta verificada! Bienvenido.")
                 st.rerun()
 
+        st.divider()
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("Reenviar código"):
-                if not _auth.code_expired():
-                    st.info("El código anterior aún es válido.")
-                else:
-                    code = _auth.generate_code()
-                    sent, msg = _auth.send_code_email(email, code)
-                    st.session_state.pending_code  = code
-                    st.session_state.code_expiry   = datetime.now() + timedelta(minutes=10)
-                    if sent:
-                        st.success("Nuevo código enviado.")
-                    elif msg == "SMTP_NOT_CONFIGURED":
-                        st.warning(f"Código de prueba: **{code}**")
-                    else:
-                        st.warning(f"Error al enviar. Código: **{code}**")
+            if st.button("🔄 Reenviar código", use_container_width=True):
+                code      = _auth.generate_code()
+                sent, _   = _auth.send_code_email(email, code)
+                st.session_state.pending_code  = code
+                st.session_state.code_expiry   = datetime.now() + timedelta(minutes=10)
+                st.session_state.email_sent    = sent
+                st.rerun()
         with col2:
-            if st.button("Volver al login"):
+            if st.button("← Volver al login", use_container_width=True):
                 st.session_state.auth_step = "login"
                 st.rerun()
 
