@@ -301,6 +301,17 @@ def _auth_page():
                     st.session_state.current_user = email.strip().lower()
                     save_data(data)
                     st.rerun()
+                elif "pendiente de verificación" in err:
+                    st.warning(err)
+                    if st.button("📧 Reenviar código de verificación", use_container_width=True):
+                        code      = _auth.generate_code()
+                        sent, _   = _auth.send_code_email(email.strip().lower(), code)
+                        st.session_state.pending_email = email.strip().lower()
+                        st.session_state.pending_code  = code
+                        st.session_state.code_expiry   = datetime.now() + timedelta(minutes=10)
+                        st.session_state.email_sent    = sent
+                        st.session_state.auth_step     = "verify"
+                        st.rerun()
                 else:
                     st.error(err)
 
