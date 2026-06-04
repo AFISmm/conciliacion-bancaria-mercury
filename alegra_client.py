@@ -13,7 +13,7 @@ class AlegraClient:
         self.session.auth = self.auth
         self.session.headers.update({"Accept": "application/json"})
 
-    def _get(self, endpoint: str, params: dict = None) -> list | dict:
+    def _get(self, endpoint: str, params: dict = None):
         url = f"{BASE_URL}/{endpoint}"
         resp = self.session.get(url, params=params, timeout=15)
         resp.raise_for_status()

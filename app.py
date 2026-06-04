@@ -188,17 +188,17 @@ def fmt(n) -> str:
         return "–"
 
 
-def cur_per(data: dict) -> dict | None:
+def cur_per(data: dict):
     return data["periods"].get(data["currentPeriodId"])
 
 
-def totals(txs: list) -> tuple[float, float]:
+def totals(txs: list):
     c = sum(t["monto"] for t in txs if t["tipo"] == "cargo")
     a = sum(t["monto"] for t in txs if t["tipo"] == "abono")
     return c, a
 
 
-def period_range(per: dict) -> tuple[str, str]:
+def period_range(per: dict):
     pid = per["id"]
     y, m = int(pid[:4]), int(pid[5:7])
     last = calendar.monthrange(y, m)[1]
@@ -345,7 +345,7 @@ def _dlg_period():
 
 
 # ── DIÁLOGO: TRANSACCIÓN ──────────────────────────────────────────────────
-@st.dialog("Movimiento bancario", width="large")
+@st.dialog("Movimiento bancario", width="large")  # noqa: E302
 def _dlg_tx():
     data    = st.session_state.data
     per     = cur_per(data)
