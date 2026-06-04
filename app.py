@@ -17,8 +17,14 @@ st.set_page_config(
 )
 
 # ── CONSTANTES ───────────────────────────────────────────────────────────
-# Ruta absoluta basada en la ubicación de este archivo (independiente del cwd)
-DATA_FILE = Path(__file__).parent / "conciliacion_data.json"
+# En local: guarda junto al app.py. En Streamlit Cloud: usa /tmp (sesión).
+_local_file = Path(__file__).parent / "conciliacion_data.json"
+try:
+    _local_file.parent.stat()
+    _local_file.touch(exist_ok=True)
+    DATA_FILE = _local_file
+except (PermissionError, OSError):
+    DATA_FILE = Path("/tmp") / "conciliacion_data.json"
 BANCOS    = ["Global66 COP", "Global66 USD", "Davivienda"]
 ESTADOS   = ["Pendiente", "Conciliado", "En revisión"]
 
@@ -237,9 +243,15 @@ def _init():
 
 # ── ALEGRA ────────────────────────────────────────────────────────────────
 def _alegra_client():
-    cfg   = st.session_state.data.get("alegra", {})
-    email = cfg.get("email", "").strip()
-    token = cfg.get("token", "").strip()
+    cfg = st.session_state.data.get("alegra", {})
+    # Prioridad: st.secrets (Streamlit Cloud) > configuración guardada en UI
+    try:
+        sec = st.secrets.get("alegra", {})
+        email = sec.get("email", "").strip() or cfg.get("email", "").strip()
+        token = sec.get("token", "").strip() or cfg.get("token", "").strip()
+    except Exception:
+        email = cfg.get("email", "").strip()
+        token = cfg.get("token", "").strip()
     if not (email and token):
         return None
     try:
