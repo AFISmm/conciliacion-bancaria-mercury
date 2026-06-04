@@ -266,7 +266,8 @@ def _init():
     if "pending_email"   not in st.session_state: st.session_state.pending_email   = ""
     if "pending_code"    not in st.session_state: st.session_state.pending_code    = ""
     if "code_expiry"     not in st.session_state: st.session_state.code_expiry     = None
-    if "email_sent"      not in st.session_state: st.session_state.email_sent      = False
+    if "email_sent"       not in st.session_state: st.session_state.email_sent       = False
+    if "unverified_email" not in st.session_state: st.session_state.unverified_email = ""
 
 
 # ── PANTALLA DE AUTENTICACIÓN ─────────────────────────────────────────────
@@ -294,26 +295,35 @@ def _auth_page():
                 email    = st.text_input("Correo electrónico", placeholder="correo@empresa.com")
                 password = st.text_input("Contraseña", type="password")
                 submitted = st.form_submit_button("Ingresar", use_container_width=True, type="primary")
+
             if submitted:
                 ok, err = _auth.authenticate(data, email, password)
                 if ok:
-                    st.session_state.logged_in    = True
-                    st.session_state.current_user = email.strip().lower()
+                    st.session_state.logged_in       = True
+                    st.session_state.current_user    = email.strip().lower()
+                    st.session_state.unverified_email = ""
                     save_data(data)
                     st.rerun()
                 elif "pendiente de verificación" in err:
-                    st.warning(err)
-                    if st.button("📧 Reenviar código de verificación", use_container_width=True):
-                        code      = _auth.generate_code()
-                        sent, _   = _auth.send_code_email(email.strip().lower(), code)
-                        st.session_state.pending_email = email.strip().lower()
-                        st.session_state.pending_code  = code
-                        st.session_state.code_expiry   = datetime.now() + timedelta(minutes=10)
-                        st.session_state.email_sent    = sent
-                        st.session_state.auth_step     = "verify"
-                        st.rerun()
+                    st.session_state.unverified_email = email.strip().lower()
                 else:
                     st.error(err)
+                    st.session_state.unverified_email = ""
+
+            # Fuera del if submitted para que el botón funcione en su propio clic
+            if st.session_state.get("unverified_email"):
+                st.warning("⚠️ Cuenta pendiente de verificación. Revise su correo o reenvíe el código.")
+                if st.button("📧 Reenviar código de verificación", use_container_width=True):
+                    em    = st.session_state.unverified_email
+                    code  = _auth.generate_code()
+                    sent, _ = _auth.send_code_email(em, code)
+                    st.session_state.pending_email    = em
+                    st.session_state.pending_code     = code
+                    st.session_state.code_expiry      = datetime.now() + timedelta(minutes=10)
+                    st.session_state.email_sent       = sent
+                    st.session_state.auth_step        = "verify"
+                    st.session_state.unverified_email = ""
+                    st.rerun()
 
         with tab_reg:
             with st.form("form_reg"):
