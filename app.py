@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import auth as _auth
 
 # ── CONFIGURACIÓN (debe ser la primera llamada a st) ─────────────────────
 st.set_page_config(
@@ -31,6 +32,16 @@ ESTADOS   = ["Pendiente", "Conciliado", "En revisión"]
 # ── CSS ──────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
+/* Ocultar barra superior de Streamlit */
+header[data-testid="stHeader"]   { display: none !important; }
+[data-testid="stToolbar"]        { display: none !important; }
+[data-testid="stDecoration"]     { display: none !important; }
+[data-testid="stStatusWidget"]   { display: none !important; }
+.stDeployButton                  { display: none !important; }
+#MainMenu                        { display: none !important; }
+footer                           { display: none !important; }
+
+/* Métricas */
 div[data-testid="metric-container"] {
     background:#fff;border:1px solid #e0e0e0;border-radius:8px;
     padding:10px 14px;box-shadow:0 2px 8px rgba(0,0,0,.08);
@@ -38,6 +49,19 @@ div[data-testid="metric-container"] {
 [data-testid="stMetricLabel"]  {font-size:.72rem;color:#757575;}
 [data-testid="stMetricValue"]  {font-size:1.05rem;font-weight:700;}
 .block-container {padding-top:.8rem !important;}
+
+/* Tarjeta de login */
+.auth-card {
+    max-width:420px;margin:60px auto 0;
+    background:#fff;border-radius:12px;
+    box-shadow:0 4px 24px rgba(0,0,0,.12);
+    overflow:hidden;
+}
+.auth-header {
+    background:#2c3e50;color:#fff;
+    padding:28px 32px;text-align:center;
+}
+.auth-body { padding:28px 32px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -233,8 +257,129 @@ def _init():
     if "filter_date"     not in st.session_state: st.session_state.filter_date     = date.today().isoformat()
     if "bw_month"        not in st.session_state: st.session_state.bw_month        = ""
     if "bw_half"         not in st.session_state: st.session_state.bw_half         = 1
-    if "dialog"     not in st.session_state: st.session_state.dialog     = None
-    if "edit_tx_id" not in st.session_state: st.session_state.edit_tx_id = None
+    if "dialog"          not in st.session_state: st.session_state.dialog          = None
+    if "edit_tx_id"      not in st.session_state: st.session_state.edit_tx_id      = None
+    # Auth
+    if "logged_in"       not in st.session_state: st.session_state.logged_in       = False
+    if "current_user"    not in st.session_state: st.session_state.current_user    = None
+    if "auth_step"       not in st.session_state: st.session_state.auth_step       = "login"
+    if "pending_email"   not in st.session_state: st.session_state.pending_email   = ""
+    if "pending_code"    not in st.session_state: st.session_state.pending_code    = ""
+    if "code_expiry"     not in st.session_state: st.session_state.code_expiry     = None
+
+
+# ── PANTALLA DE AUTENTICACIÓN ─────────────────────────────────────────────
+def _auth_page():
+    data = st.session_state.data
+
+    st.markdown("""
+    <div class="auth-card">
+      <div class="auth-header">
+        <div style="font-size:2rem;">🏦</div>
+        <h2 style="margin:8px 0 4px;font-size:1.2rem;">Conciliación Bancaria</h2>
+        <p style="margin:0;opacity:.75;font-size:.8rem;">Mercury Methods Ltda</p>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    step = st.session_state.auth_step
+
+    # ── PASO 1: Login / Registro ────────────────────────────────────────
+    if step == "login":
+        tab_login, tab_reg = st.tabs(["Iniciar sesión", "Registrarse"])
+
+        with tab_login:
+            with st.form("form_login"):
+                email    = st.text_input("Correo electrónico", placeholder="correo@empresa.com")
+                password = st.text_input("Contraseña", type="password")
+                submitted = st.form_submit_button("Ingresar", use_container_width=True, type="primary")
+            if submitted:
+                ok, err = _auth.authenticate(data, email, password)
+                if ok:
+                    st.session_state.logged_in    = True
+                    st.session_state.current_user = email.strip().lower()
+                    save_data(data)
+                    st.rerun()
+                else:
+                    st.error(err)
+
+        with tab_reg:
+            with st.form("form_reg"):
+                name     = st.text_input("Nombre completo")
+                email    = st.text_input("Correo electrónico", placeholder="correo@empresa.com")
+                password = st.text_input("Contraseña (mín. 6 caracteres)", type="password")
+                confirm  = st.text_input("Confirmar contraseña", type="password")
+                submitted = st.form_submit_button("Registrarse", use_container_width=True, type="primary")
+            if submitted:
+                if password != confirm:
+                    st.error("Las contraseñas no coinciden.")
+                else:
+                    ok, err = _auth.register_user(data, email, password, name)
+                    if not ok:
+                        st.error(err)
+                    else:
+                        # Generar y enviar código
+                        code   = _auth.generate_code()
+                        sent, msg = _auth.send_code_email(email.strip().lower(), code)
+                        st.session_state.pending_email = email.strip().lower()
+                        st.session_state.pending_code  = code
+                        st.session_state.code_expiry   = datetime.now() + timedelta(minutes=10)
+                        save_data(data)
+                        st.session_state.auth_step = "verify"
+                        if sent:
+                            st.success(f"Código enviado a **{email}**. Revise su bandeja de entrada.")
+                        elif msg == "SMTP_NOT_CONFIGURED":
+                            st.warning(f"SMTP no configurado. Código de prueba: **{code}**")
+                        else:
+                            st.warning(f"No se pudo enviar el correo ({msg}). Código de prueba: **{code}**")
+                        st.rerun()
+
+    # ── PASO 2: Verificar código ────────────────────────────────────────
+    elif step == "verify":
+        email = st.session_state.pending_email
+        st.info(f"Se envió un código de verificación a **{email}**")
+
+        with st.form("form_verify"):
+            code_input = st.text_input("Código de 6 dígitos", max_chars=6, placeholder="123456")
+            submitted  = st.form_submit_button("Verificar", use_container_width=True, type="primary")
+
+        if submitted:
+            if _auth.code_expired():
+                st.error("El código expiró. Regístrese nuevamente.")
+                st.session_state.auth_step = "login"
+                st.rerun()
+            elif code_input.strip() != st.session_state.pending_code:
+                st.error("Código incorrecto. Intente de nuevo.")
+            else:
+                _auth.mark_verified(data, email)
+                st.session_state.logged_in    = True
+                st.session_state.current_user = email
+                st.session_state.auth_step    = "login"
+                st.session_state.pending_code = ""
+                save_data(data)
+                st.success("¡Cuenta verificada! Bienvenido.")
+                st.rerun()
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Reenviar código"):
+                if not _auth.code_expired():
+                    st.info("El código anterior aún es válido.")
+                else:
+                    code = _auth.generate_code()
+                    sent, msg = _auth.send_code_email(email, code)
+                    st.session_state.pending_code  = code
+                    st.session_state.code_expiry   = datetime.now() + timedelta(minutes=10)
+                    if sent:
+                        st.success("Nuevo código enviado.")
+                    elif msg == "SMTP_NOT_CONFIGURED":
+                        st.warning(f"Código de prueba: **{code}**")
+                    else:
+                        st.warning(f"Error al enviar. Código: **{code}**")
+        with col2:
+            if st.button("Volver al login"):
+                st.session_state.auth_step = "login"
+                st.rerun()
 
 
 # ── DIÁLOGO: PERÍODO ──────────────────────────────────────────────────────
@@ -447,6 +592,17 @@ def _sidebar():
     per  = cur_per(data)
 
     st.sidebar.markdown("## 🏦 Conciliación Bancaria\n**Mercury Methods Ltda**")
+
+    # Usuario logueado
+    user = st.session_state.get("current_user", "")
+    users = _auth.get_users(data)
+    name  = users.get(user, {}).get("name", "") or user
+    st.sidebar.caption(f"👤 {name}")
+    if st.sidebar.button("Cerrar sesión", use_container_width=True):
+        st.session_state.logged_in    = False
+        st.session_state.current_user = None
+        st.rerun()
+
     st.sidebar.divider()
 
     # ── Período ────────────────────────────────────────────────────────
@@ -706,6 +862,12 @@ y sincronizar el plan de cuentas y contactos directamente desde el software.
 # ── MAIN ──────────────────────────────────────────────────────────────────
 def main():
     _init()
+
+    # Si no está logueado, mostrar pantalla de auth y detener
+    if not st.session_state.logged_in:
+        _auth_page()
+        return
+
     _sidebar()
 
     data = st.session_state.data
