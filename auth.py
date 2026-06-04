@@ -85,13 +85,15 @@ def send_code_email(to_email: str, code: str) -> tuple:
         msg.attach(MIMEText(html, "html", "utf-8"))
 
         if port == 465:
-            with smtplib.SMTP_SSL(host, port, timeout=10) as srv:
+            with smtplib.SMTP_SSL(host, port, timeout=15) as srv:
+                srv.ehlo()
                 srv.login(user, password)
                 srv.send_message(msg)
         else:
-            with smtplib.SMTP(host, port, timeout=10) as srv:
+            with smtplib.SMTP(host, port, timeout=15) as srv:
                 srv.ehlo()
                 srv.starttls()
+                srv.ehlo()   # Microsoft 365 requiere re-identificarse tras STARTTLS
                 srv.login(user, password)
                 srv.send_message(msg)
         return True, ""
