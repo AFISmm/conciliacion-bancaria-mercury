@@ -233,54 +233,8 @@ def _init():
     if "filter_date"     not in st.session_state: st.session_state.filter_date     = date.today().isoformat()
     if "bw_month"        not in st.session_state: st.session_state.bw_month        = ""
     if "bw_half"         not in st.session_state: st.session_state.bw_half         = 1
-    if "dialog"          not in st.session_state: st.session_state.dialog          = None
-    if "edit_tx_id"      not in st.session_state: st.session_state.edit_tx_id      = None
-    if "al_contacts"     not in st.session_state: st.session_state.al_contacts     = []
-    if "al_accounts"     not in st.session_state: st.session_state.al_accounts     = []
-    if "al_bank_accounts"not in st.session_state: st.session_state.al_bank_accounts= []
-    if "al_txs"          not in st.session_state: st.session_state.al_txs          = []
-
-
-# ── ALEGRA ────────────────────────────────────────────────────────────────
-def _alegra_client():
-    cfg = st.session_state.data.get("alegra", {})
-    # Prioridad: st.secrets (Streamlit Cloud) > configuración guardada en UI
-    try:
-        sec = st.secrets.get("alegra", {})
-        email = sec.get("email", "").strip() or cfg.get("email", "").strip()
-        token = sec.get("token", "").strip() or cfg.get("token", "").strip()
-    except Exception:
-        email = cfg.get("email", "").strip()
-        token = cfg.get("token", "").strip()
-    if not (email and token):
-        return None
-    try:
-        from alegra_client import AlegraClient
-        return AlegraClient(email, token)
-    except Exception:
-        return None
-
-
-def _refresh_catalogs():
-    c = _alegra_client()
-    if not c:
-        return
-    try:
-        contacts = c.get_contacts()
-        st.session_state.al_contacts = [x.get("name","") for x in contacts if x.get("name")]
-    except Exception:
-        pass
-    try:
-        accounts = c.get_accounts()
-        st.session_state.al_accounts = [
-            f"{x.get('id','')} – {x.get('name','')}" for x in accounts
-        ]
-    except Exception:
-        pass
-    try:
-        st.session_state.al_bank_accounts = c.get_bank_accounts()
-    except Exception:
-        pass
+    if "dialog"     not in st.session_state: st.session_state.dialog     = None
+    if "edit_tx_id" not in st.session_state: st.session_state.edit_tx_id = None
 
 
 # ── DIÁLOGO: PERÍODO ──────────────────────────────────────────────────────
@@ -540,44 +494,19 @@ def _sidebar():
 
     # ── Alegra ─────────────────────────────────────────────────────────
     st.sidebar.markdown("### 🔗 Alegra")
-    cfg = data.setdefault("alegra", {"email": "", "token": "", "bank_account_id": None})
+    cfg = data.setdefault("alegra", {"email": "", "token": ""})
     connected = bool(cfg.get("email") and cfg.get("token"))
-    st.sidebar.caption("✅ Conectado" if connected else "⚠️ Sin credenciales")
+    st.sidebar.caption("✅ Credenciales guardadas" if connected else "⚙️ Pendiente de configurar")
 
-    with st.sidebar.expander("Configurar", expanded=not connected):
+    with st.sidebar.expander("Configurar conexión", expanded=not connected):
         email = st.text_input("Email Alegra", value=cfg.get("email",""), key="al_email")
-        token = st.text_input("Token API",    value=cfg.get("token",""), type="password", key="al_token")
-        c1, c2 = st.columns(2)
-        if c1.button("Guardar", key="al_save"):
+        token = st.text_input("Token API", value=cfg.get("token",""), type="password", key="al_token")
+        st.caption("El token se obtiene en Alegra → Configuración → Mi perfil → Token de API")
+        if st.button("💾 Guardar credenciales", key="al_save", use_container_width=True):
             cfg["email"] = email.strip()
             cfg["token"] = token.strip()
             save_data(data)
-            _refresh_catalogs()
-            st.success("Guardado")
-        if c2.button("Probar", key="al_test"):
-            client = _alegra_client()
-            if not client:
-                st.error("Complete email y token.")
-            else:
-                try:
-                    info = client.test_connection()
-                    name = info.get("name") or "OK"
-                    st.success(f"✅ {name}")
-                    _refresh_catalogs()
-                except Exception as e:
-                    st.error(f"Error: {e}")
-
-    if st.session_state.al_bank_accounts:
-        ba_opts = {b.get("name", str(b.get("id",""))): b.get("id")
-                   for b in st.session_state.al_bank_accounts}
-        ba_names = list(ba_opts.keys())
-        cur_id   = cfg.get("bank_account_id")
-        cur_name = next((n for n, i in ba_opts.items() if i == cur_id), ba_names[0])
-        sel = st.sidebar.selectbox("Cuenta bancaria Alegra", ba_names,
-                                    index=ba_names.index(cur_name) if cur_name in ba_names else 0)
-        if ba_opts.get(sel) != cur_id:
-            cfg["bank_account_id"] = ba_opts.get(sel)
-            save_data(data)
+            st.success("Credenciales guardadas.")
 
     st.sidebar.divider()
 
@@ -688,29 +617,22 @@ def _table(per: dict):
                     "contacto","nota","estado"]
     df_view = df[display_cols].copy()
 
-    al_contacts = st.session_state.al_contacts or \
-                  sorted({t.get("contacto","") for t in per["transactions"]} - {""})
-    al_accounts = st.session_state.al_accounts or \
-                  sorted({t.get("cuenta","") for t in per["transactions"]} - {""})
-
     edited = st.data_editor(
         df_view,
         column_config={
             "id":          None,
-            "fecha":       st.column_config.TextColumn("Fecha",      disabled=True),
-            "descripcion": st.column_config.TextColumn("Descripción",disabled=True, width="large"),
-            "movimiento":  st.column_config.TextColumn("N° Mov.",    disabled=True),
-            "tipo":        st.column_config.SelectboxColumn("Tipo",  options=["cargo","abono"], disabled=True, width="small"),
-            "Cargo ($)":   st.column_config.NumberColumn("Cargo ($)",disabled=True, format="$%,.2f"),
-            "Abono ($)":   st.column_config.NumberColumn("Abono ($)",disabled=True, format="$%,.2f"),
+            "fecha":       st.column_config.TextColumn("Fecha",        disabled=True),
+            "descripcion": st.column_config.TextColumn("Descripción",  disabled=True, width="large"),
+            "movimiento":  st.column_config.TextColumn("N° Mov.",      disabled=True),
+            "tipo":        st.column_config.SelectboxColumn("Tipo",    options=["cargo","abono"], disabled=True, width="small"),
+            "Cargo ($)":   st.column_config.NumberColumn("Cargo ($)",  disabled=True, format="$%,.2f"),
+            "Abono ($)":   st.column_config.NumberColumn("Abono ($)",  disabled=True, format="$%,.2f"),
             "concepto":    st.column_config.TextColumn("Concepto Alegra"),
-            "cuenta":      st.column_config.SelectboxColumn("Cuenta contable", options=al_accounts) if al_accounts
-                           else st.column_config.TextColumn("Cuenta contable"),
+            "cuenta":      st.column_config.TextColumn("Cuenta contable"),
             "cuentaRef":   st.column_config.TextColumn("Ref. cuenta"),
-            "contacto":    st.column_config.SelectboxColumn("Contacto", options=al_contacts) if al_contacts
-                           else st.column_config.TextColumn("Contacto"),
+            "contacto":    st.column_config.TextColumn("Contacto"),
             "nota":        st.column_config.TextColumn("Notas"),
-            "estado":      st.column_config.SelectboxColumn("Estado", options=ESTADOS, width="medium"),
+            "estado":      st.column_config.SelectboxColumn("Estado",  options=ESTADOS, width="medium"),
         },
         disabled=["fecha","descripcion","movimiento","tipo","Cargo ($)","Abono ($)"],
         hide_index=True,
@@ -746,101 +668,39 @@ def _table(per: dict):
 
 
 # ── PANEL ALEGRA ──────────────────────────────────────────────────────────
-def _alegra_panel(per: dict):
-    data   = st.session_state.data
-    client = _alegra_client()
-    if not client:
-        st.info("Configure las credenciales de Alegra en el panel lateral para sincronizar.")
-        return
+def _alegra_panel():
+    data = st.session_state.data
+    cfg  = data.get("alegra", {})
+    connected = bool(cfg.get("email") and cfg.get("token"))
 
-    date_start, date_end = period_range(per)
-    ba_id = data.get("alegra",{}).get("bank_account_id")
+    st.markdown("### 🔗 Integración con Alegra")
 
-    c1, c2, c3 = st.columns([3, 3, 2])
-    with c1:
-        st.caption(f"Período: **{date_start}** → **{date_end}**")
-    with c2:
-        if ba_id and st.session_state.al_bank_accounts:
-            ba_name = next(
-                (b.get("name","") for b in st.session_state.al_bank_accounts if b.get("id") == ba_id),
-                str(ba_id),
-            )
-            st.caption(f"Cuenta Alegra: **{ba_name}**")
-    with c3:
-        if st.button("🔄 Sincronizar desde Alegra", type="primary"):
-            with st.spinner("Consultando Alegra..."):
-                al_txs = []
-                try:
-                    for p in client.get_payments(date_start, date_end, ba_id):
-                        amt = float(p.get("amount",0))
-                        if amt > 0:
-                            al_txs.append({
-                                "fecha":       (p.get("date","") or "")[:10],
-                                "descripcion": p.get("observations") or "Pago recibido",
-                                "movimiento":  str(p.get("id","")),
-                                "tipo":        "abono",
-                                "monto":       amt,
-                                "concepto":    "",
-                                "cuenta":      "",
-                                "cuentaRef":   "",
-                                "contacto":    (p.get("contact") or {}).get("name",""),
-                                "nota":        f"Alegra #{p.get('id','')}",
-                                "estado":      "Pendiente",
-                            })
-                except Exception as e:
-                    st.warning(f"Pagos: {e}")
-                try:
-                    for b in client.get_bills(date_start, date_end):
-                        amt = float(b.get("amount",0))
-                        if amt > 0:
-                            al_txs.append({
-                                "fecha":       (b.get("date","") or "")[:10],
-                                "descripcion": b.get("observations") or "Compra/Gasto",
-                                "movimiento":  str(b.get("id","")),
-                                "tipo":        "cargo",
-                                "monto":       amt,
-                                "concepto":    "",
-                                "cuenta":      "",
-                                "cuentaRef":   "",
-                                "contacto":    (b.get("provider") or {}).get("name",""),
-                                "nota":        f"Alegra #{b.get('id','')}",
-                                "estado":      "Pendiente",
-                            })
-                except Exception as e:
-                    st.warning(f"Compras: {e}")
-                st.session_state.al_txs = al_txs
-
-    al_txs = st.session_state.al_txs
-    if not al_txs:
-        st.info("Haga clic en 'Sincronizar' para traer movimientos desde Alegra.")
-        return
-
-    st.markdown(f"**{len(al_txs)}** registros encontrados en Alegra:")
-    df_al = pd.DataFrame(al_txs)
-    df_al["Cargo ($)"] = df_al.apply(lambda r: r["monto"] if r["tipo"]=="cargo" else None, axis=1)
-    df_al["Abono ($)"] = df_al.apply(lambda r: r["monto"] if r["tipo"]=="abono" else None, axis=1)
-    st.dataframe(
-        df_al[["fecha","descripcion","movimiento","Cargo ($)","Abono ($)","contacto","nota"]],
-        use_container_width=True, hide_index=True,
-        column_config={
-            "Cargo ($)": st.column_config.NumberColumn(format="$%,.2f"),
-            "Abono ($)": st.column_config.NumberColumn(format="$%,.2f"),
-        },
-    )
-
-    existing_movs = {t["movimiento"] for t in per["transactions"]}
-    nuevos = [t for t in al_txs if t["movimiento"] not in existing_movs]
-    if nuevos:
-        st.info(f"🆕 **{len(nuevos)}** registros nuevos (aún no están en la conciliación).")
-        if st.button(f"➕ Importar {len(nuevos)} movimientos nuevos de Alegra", type="primary"):
-            for t in nuevos:
-                per["transactions"].append(make_tx(**t))
-            save_data(data)
-            st.session_state.al_txs = []
-            st.success(f"✅ {len(nuevos)} movimientos importados.")
-            st.rerun()
+    if connected:
+        st.success(f"✅ Credenciales configuradas para **{cfg.get('email','')}**")
     else:
-        st.success("✅ Todos los registros de Alegra ya están en la conciliación.")
+        st.warning("⚙️ Las credenciales de Alegra aún no están configuradas.")
+
+    st.markdown("""
+La integración con Alegra permite importar automáticamente movimientos contables
+y sincronizar el plan de cuentas y contactos directamente desde el software.
+
+**Para configurar la conexión:**
+1. Ingrese a **Alegra** → Configuración → Mi perfil → **Token de API**
+2. Copie el token generado
+3. En el panel lateral de esta app, expanda **"Configurar conexión"**
+4. Ingrese su email de Alegra y el token
+5. Haga clic en **Guardar credenciales**
+
+> La integración automática estará disponible próximamente.
+""")
+
+    st.divider()
+    st.markdown("**Credenciales actuales:**")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.text_input("Email", value=cfg.get("email","") or "No configurado", disabled=True)
+    with c2:
+        st.text_input("Token", value="••••••••" if cfg.get("token") else "No configurado", disabled=True)
 
 
 # ── MAIN ──────────────────────────────────────────────────────────────────
@@ -907,7 +767,7 @@ def main():
         _filters(per)
 
     # ── Acciones ──────────────────────────────────────────────────────
-    a1, a2, a3, a4, _ = st.columns([1.4, 1.4, 1.2, 1.2, 4])
+    a1, a2, a3, _ = st.columns([1.4, 1.4, 1.2, 5])
     with a1:
         if st.button("➕ Agregar movimiento", use_container_width=True, type="primary"):
             st.session_state.dialog    = "tx"
@@ -921,10 +781,6 @@ def main():
         if st.button("💾 Guardar", use_container_width=True):
             save_data(data)
             st.toast("Guardado ✅")
-    with a4:
-        if st.button("🔄 Catálogos Alegra", use_container_width=True):
-            _refresh_catalogs()
-            st.toast("Catálogos actualizados")
 
     st.markdown("")
 
@@ -953,7 +809,7 @@ def main():
                 st.rerun()
 
     with tab_alegra:
-        _alegra_panel(per)
+        _alegra_panel()
 
 
 if __name__ == "__main__":
