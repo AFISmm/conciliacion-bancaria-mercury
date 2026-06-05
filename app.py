@@ -567,30 +567,33 @@ def _sidebar():
     per_ids  = [p["id"] for p in periods]
     per_lbls = [f"{p['nombre']} — {p['banco']}" for p in periods]
     cur_pid  = co.get("currentPeriodId","")
-    cur_i    = per_ids.index(cur_pid) if cur_pid in per_ids else 0
 
-    sel_i = st.sidebar.selectbox("Período activo", range(len(per_lbls)),
-                                  format_func=lambda i: per_lbls[i], index=cur_i)
-    if per_ids[sel_i] != cur_pid:
-        co["currentPeriodId"] = per_ids[sel_i]
-        save_data(data); st.rerun()
+    if per_ids:
+        cur_i = per_ids.index(cur_pid) if cur_pid in per_ids else 0
+        sel_i = st.sidebar.selectbox("Período activo", range(len(per_lbls)),
+                                      format_func=lambda i: per_lbls[i], index=cur_i)
+        if per_ids[sel_i] != cur_pid:
+            co["currentPeriodId"] = per_ids[sel_i]
+            save_data(data); st.rerun()
 
-    per = cur_per(data)
-    if per:
-        st.sidebar.caption(f"Cta: {per.get('cuenta','–')}")
-        bi = BANCOS.index(per["banco"]) if per.get("banco") in BANCOS else 0
-        nb = st.sidebar.selectbox("Banco", BANCOS, index=bi)
-        if nb != per.get("banco"):
-            per["banco"] = nb; save_data(data); st.rerun()
+        per = cur_per(data)
+        if per:
+            st.sidebar.caption(f"Cta: {per.get('cuenta','–')}")
+            bi = BANCOS.index(per["banco"]) if per.get("banco") in BANCOS else 0
+            nb = st.sidebar.selectbox("Banco", BANCOS, index=bi)
+            if nb != per.get("banco"):
+                per["banco"] = nb; save_data(data); st.rerun()
+    else:
+        st.sidebar.info("Sin períodos. Cree uno con ➕ Nuevo.")
+        per = None
 
     pc1,pc2 = st.sidebar.columns(2)
     if pc1.button("➕ Nuevo", use_container_width=True):
         ss.dialog="new_period"; st.rerun()
     if pc2.button("✏️ Editar", use_container_width=True):
         if per: ss.dialog="edit_period"; st.rerun()
-    if per and st.sidebar.button("🗑️ Eliminar período", use_container_width=True):
-        if len(co["periods"])<=1: st.sidebar.error("No se puede eliminar el único período.")
-        else: ss.dialog="delete_period"; st.rerun()
+    if per and len(per_ids)>1 and st.sidebar.button("🗑️ Eliminar período", use_container_width=True):
+        ss.dialog="delete_period"; st.rerun()
 
     st.sidebar.divider()
 
