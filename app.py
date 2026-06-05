@@ -536,39 +536,43 @@ def _auth_page():
 def _sidebar():
     data = st.session_state.data
     ss   = st.session_state
+    co   = cur_co(data) if ss.company_selected else None
 
-    # Usuario
-    users   = _auth.get_users(data)
-    uname   = users.get(ss.current_user,{}).get("name","") or ss.current_user
-    st.sidebar.markdown(f"### 🏦 Mercury Methods\n👤 **{uname}**")
+    # ── Encabezado: nombre empresa seleccionada o genérico ───────────────
+    users = _auth.get_users(data)
+    uname = users.get(ss.current_user,{}).get("name","") or ss.current_user
+    title = co.get("name","") if co else "Portal de Conciliaciones"
+    st.sidebar.markdown(f"**{title}**\n\n👤 {uname}")
     if st.sidebar.button("Cerrar sesión", use_container_width=True):
         ss.logged_in=False; ss.current_user=None; ss.company_selected=False; st.rerun()
     st.sidebar.divider()
 
-    # ── Empresas ────────────────────────────────────────────────────────
+    # ── Empresas (siempre visible) ────────────────────────────────────────
     st.sidebar.markdown("### 🏢 Empresas")
     cur_co_id = data.get("currentCompanyId","")
-    for co in COMPANIES:
-        is_active = co["id"] == cur_co_id and ss.company_selected
-        label = f"{'▶ ' if is_active else ''}{co['name']}"
+    for c in COMPANIES:
+        is_active = c["id"] == cur_co_id and ss.company_selected
+        label = f"{'▶  ' if is_active else ''}{c['name']}"
         if st.sidebar.button(label, use_container_width=True,
                               type="primary" if is_active else "secondary",
-                              key=f"co_{co['id']}"):
-            data["currentCompanyId"] = co["id"]
+                              key=f"co_{c['id']}"):
+            data["currentCompanyId"] = c["id"]
             ss.company_selected = True
             save_data(data); st.rerun()
+
+    # ── Resto solo aparece si hay empresa seleccionada ────────────────────
+    if not ss.company_selected or not co:
+        return
+
     st.sidebar.divider()
 
     # ── Período ─────────────────────────────────────────────────────────
-    co = cur_co(data)
-    if not co:
-        return
-
     st.sidebar.markdown("### 📅 Período")
     periods  = sorted(co["periods"].values(), key=lambda p: p["id"], reverse=True)
     per_ids  = [p["id"] for p in periods]
-    per_lbls = [f"{p['nombre']} — {p['banco']}" for p in periods]
+    per_lbls = [p["nombre"] for p in periods]
     cur_pid  = co.get("currentPeriodId","")
+    per      = None
 
     if per_ids:
         cur_i = per_ids.index(cur_pid) if cur_pid in per_ids else 0
@@ -577,31 +581,29 @@ def _sidebar():
         if per_ids[sel_i] != cur_pid:
             co["currentPeriodId"] = per_ids[sel_i]
             save_data(data); st.rerun()
-
         per = cur_per(data)
-        if per:
-            st.sidebar.caption(f"Cta: {per.get('cuenta','–')}")
-            bi = BANCOS.index(per["banco"]) if per.get("banco") in BANCOS else 0
-            nb = st.sidebar.selectbox("Banco", BANCOS, index=bi)
-            if nb != per.get("banco"):
-                per["banco"] = nb; save_data(data); st.rerun()
     else:
-        st.sidebar.info("Sin períodos. Cree uno con ➕ Nuevo.")
-        per = None
+        st.sidebar.info("Sin períodos. Use ➕ Nuevo.")
 
-    pc1,pc2 = st.sidebar.columns(2)
-    if pc1.button("➕ Nuevo", use_container_width=True):
-        ss.dialog="new_period"; st.rerun()
+    pc1, pc2 = st.sidebar.columns(2)
+    if pc1.button("➕ Nuevo",  use_container_width=True): ss.dialog="new_period"; st.rerun()
     if pc2.button("✏️ Editar", use_container_width=True):
         if per: ss.dialog="edit_period"; st.rerun()
-    if per and len(per_ids)>1 and st.sidebar.button("🗑️ Eliminar período", use_container_width=True):
-        ss.dialog="delete_period"; st.rerun()
 
     st.sidebar.divider()
 
+    # ── Banco ────────────────────────────────────────────────────────────
+    if per:
+        st.sidebar.markdown("### 🏦 Banco")
+        bi = BANCOS.index(per["banco"]) if per.get("banco") in BANCOS else 0
+        nb = st.sidebar.selectbox("Banco", BANCOS, index=bi, label_visibility="collapsed")
+        if nb != per.get("banco"):
+            per["banco"] = nb; save_data(data); st.rerun()
+        st.sidebar.divider()
+
     # ── Alegra ──────────────────────────────────────────────────────────
     st.sidebar.markdown("### 🔗 Alegra")
-    cfg = data.setdefault("alegra",{"email":"","token":""})
+    cfg   = data.setdefault("alegra",{"email":"","token":""})
     ok_al = bool(cfg.get("email") and cfg.get("token"))
     st.sidebar.caption("✅ Credenciales OK" if ok_al else "⚙️ Sin configurar")
     with st.sidebar.expander("Configurar"):
@@ -611,27 +613,7 @@ def _sidebar():
             cfg["email"]=em2.strip(); cfg["token"]=tk2.strip()
             save_data(data); st.success("Guardado")
 
-    st.sidebar.divider()
-
-    # ── Datos ────────────────────────────────────────────────────────────
-    st.sidebar.markdown("### 📂 Datos")
-    st.sidebar.download_button("⬇️ Exportar JSON",
-        data=json.dumps(data,ensure_ascii=False,indent=2),
-        file_name=f"conciliacion_{date.today()}.json",
-        mime="application/json", use_container_width=True)
-    up = st.sidebar.file_uploader("⬆️ Importar JSON", type=["json"])
-    if up:
-        try:
-            imp = json.load(up)
-            if "companies" not in imp and "periods" not in imp:
-                raise ValueError("Formato inválido")
-            imp = _migrate(imp)
-            mx  = max((t.get("id",0) for co2 in imp["companies"].values()
-                       for p in co2["periods"].values() for t in p["transactions"]),default=1000)
-            ss["_id"]=mx; ss.data=imp; save_data(imp)
-            st.sidebar.success("Importado"); st.rerun()
-        except Exception as e:
-            st.sidebar.error(f"Error: {e}")
+    # (sección Datos eliminada)
 
 
 # ── MÉTRICAS ──────────────────────────────────────────────────────────────────
