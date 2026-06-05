@@ -1,5 +1,8 @@
-"""Conciliación Bancaria – Mercury Methods · Streamlit + Alegra."""
+"""Conciliación Bancaria – Mercury Methods v2.0
+Multi-empresa · Multi-período · Autenticación · Import/Export
+"""
 
+import io
 import json
 import calendar
 from datetime import date, datetime, timedelta
@@ -9,7 +12,7 @@ import pandas as pd
 import streamlit as st
 import auth as _auth
 
-# ── CONFIGURACIÓN (debe ser la primera llamada a st) ─────────────────────
+# ── PAGE CONFIG ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Conciliación Bancaria – Mercury Methods",
     page_icon="🏦",
@@ -17,66 +20,69 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── CONSTANTES ───────────────────────────────────────────────────────────
-# En local: guarda junto al app.py. En Streamlit Cloud: usa /tmp (sesión).
-_local_file = Path(__file__).parent / "conciliacion_data.json"
+# ── CONSTANTS ─────────────────────────────────────────────────────────────────
+_local = Path(__file__).parent / "conciliacion_data.json"
 try:
-    _local_file.parent.stat()
-    _local_file.touch(exist_ok=True)
-    DATA_FILE = _local_file
+    _local.touch(exist_ok=True)
+    DATA_FILE = _local
 except (PermissionError, OSError):
     DATA_FILE = Path("/tmp") / "conciliacion_data.json"
-BANCOS    = ["Global66 COP", "Global66 USD", "Davivienda"]
-ESTADOS   = ["Pendiente", "Conciliado", "En revisión"]
 
-# ── CSS ──────────────────────────────────────────────────────────────────
+BANCOS  = ["Global66 COP", "Global66 USD", "Davivienda", "Bancolombia", "Nequi"]
+ESTADOS = ["Pendiente", "Conciliado", "En revisión"]
+
+COMPANIES = [
+    {"id": "mercury-ltda",  "name": "Mercury Methods LTDA"},
+    {"id": "mercury-llc",   "name": "Mercury Methods LLC"},
+    {"id": "david-illidge", "name": "David Illidge"},
+    {"id": "azahar-retail", "name": "Azahar Retail"},
+    {"id": "test",          "name": "TEST"},
+]
+
+# ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-/* Ocultar barra superior de Streamlit */
-header[data-testid="stHeader"]   { display: none !important; }
-[data-testid="stToolbar"]        { display: none !important; }
-[data-testid="stDecoration"]     { display: none !important; }
-[data-testid="stStatusWidget"]   { display: none !important; }
-.stDeployButton                  { display: none !important; }
-#MainMenu                        { display: none !important; }
-footer                           { display: none !important; }
+/* Ocultar barra superior Streamlit */
+header[data-testid="stHeader"]  { display:none !important; }
+[data-testid="stToolbar"]       { display:none !important; }
+[data-testid="stDecoration"]    { display:none !important; }
+.stDeployButton                 { display:none !important; }
+#MainMenu                       { display:none !important; }
+footer                          { display:none !important; }
 
 /* Métricas */
 div[data-testid="metric-container"] {
     background:#fff;border:1px solid #e0e0e0;border-radius:8px;
     padding:10px 14px;box-shadow:0 2px 8px rgba(0,0,0,.08);
 }
-[data-testid="stMetricLabel"]  {font-size:.72rem;color:#757575;}
-[data-testid="stMetricValue"]  {font-size:1.05rem;font-weight:700;}
-.block-container {padding-top:.8rem !important;}
+[data-testid="stMetricLabel"] {font-size:.72rem;color:#757575;}
+[data-testid="stMetricValue"] {font-size:1rem;font-weight:700;}
+.block-container {padding-top:.6rem !important;}
 
-/* Tarjeta de login */
-.auth-card {
-    max-width:420px;margin:60px auto 0;
-    background:#fff;border-radius:12px;
-    box-shadow:0 4px 24px rgba(0,0,0,.12);
-    overflow:hidden;
+/* Empresa activa en sidebar */
+div[data-testid="stSidebar"] .company-btn-active > button {
+    background:#2c3e50 !important;color:#fff !important;font-weight:700 !important;
 }
+
+/* Auth card */
 .auth-header {
-    background:#2c3e50;color:#fff;
-    padding:28px 32px;text-align:center;
+    background:#2c3e50;color:#fff;padding:28px;border-radius:12px 12px 0 0;text-align:center;
 }
-.auth-body { padding:28px 32px; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── MODELO DE DATOS ──────────────────────────────────────────────────────
-def _next_id() -> int:
-    st.session_state.setdefault("_id_ctr", 1000)
-    st.session_state["_id_ctr"] += 1
-    return st.session_state["_id_ctr"]
+# ── NEXT ID ───────────────────────────────────────────────────────────────────
+def _nid() -> int:
+    st.session_state.setdefault("_id", 1000)
+    st.session_state["_id"] += 1
+    return st.session_state["_id"]
 
-
-def make_tx(fecha, desc, mov, tipo, monto,
-            concepto="", cuenta="", cuenta_ref="", contacto="",
+# ── MAKE TX ───────────────────────────────────────────────────────────────────
+def make_tx(fecha="", desc="", mov="", tipo="cargo", monto=0.0,
+            concepto="", cuenta="", cuenta_ref="", origen="",
             nota="", estado="Pendiente", tx_id=None) -> dict:
     return {
-        "id":          tx_id if tx_id is not None else _next_id(),
+        "id":          tx_id or _nid(),
         "fecha":       str(fecha),
         "descripcion": str(desc),
         "movimiento":  str(mov),
@@ -85,114 +91,152 @@ def make_tx(fecha, desc, mov, tipo, monto,
         "concepto":    concepto,
         "cuenta":      cuenta,
         "cuentaRef":   cuenta_ref,
-        "contacto":    contacto,
+        "origen":      origen,
         "nota":        nota,
         "estado":      estado,
     }
 
-
-def _marzo_2026_txs() -> list:
+# ── TEST DATA ─────────────────────────────────────────────────────────────────
+def _test_txs() -> list:
     rows = [
-        ("2026-03-03","Otro Movimiento de Retiro","28831783","cargo",6405200.00,"","Según destinatario","22xx / 5105xx / 3710xx","","","Pendiente"),
-        ("2026-03-03","GMF","11383614","cargo",12003.56,"Impuestos no acreditables","54100501","Gastos por impuestos no acreditables","Global66","GMF 4x1000 retiro 28831783","Conciliado"),
-        ("2026-03-03","Otro Movimiento de Depósito","62012","abono",18795319.37,"","","13050501 / 23550001","","","Pendiente"),
-        ("2026-03-05","GMF","11454399","cargo",1104.32,"Impuestos no acreditables","54100501","Gastos por impuestos no acreditables","Global66","GMF Comcel 11160098","Conciliado"),
-        ("2026-03-05","Compra Comcel Domiciliacion M","11160098 (T:5829)","cargo",276080.00,"Teléfono","51353501","Servicios / Teléfono","Comcel / Claro","","Conciliado"),
-        ("2026-03-05","GMF","11454421","cargo",179.46,"Impuestos no acreditables","54100501","Gastos por impuestos no acreditables","Global66","GMF Comcel 11160123","Conciliado"),
-        ("2026-03-05","Compra Comcel Domiciliacion M","11160123 (T:5829)","cargo",44864.00,"Teléfono","51353501","Servicios / Teléfono","Comcel / Claro","","Conciliado"),
-        ("2026-03-05","Otro Movimiento de Depósito","28992772","abono",42143.91,"","","13050501 / 23550001","","","Pendiente"),
-        ("2026-03-06","Otro Movimiento de Depósito","6937581 (T:5829)","abono",56563.15,"","","13050501 / 23550001","","","Pendiente"),
-        ("2026-03-06","GMF","11519323","cargo",226.26,"Impuestos no acreditables","54100501","Gastos por impuestos no acreditables","Global66","GMF Microsoft 11192582","Conciliado"),
-        ("2026-03-06","Compra Microsoft#g143376191","11192582 (T:5829)","cargo",56563.15,"Software contables","51959501","Servicios online / Software","Microsoft","","Conciliado"),
-        ("2026-03-06","Otro Movimiento de Depósito","6937612 (T:5829)","abono",55505.39,"","","","","","Pendiente"),
-        ("2026-03-06","GMF","11519380","cargo",222.03,"Impuestos no acreditables","54100501","Gastos por impuestos no acreditables","Global66","GMF Microsoft 11192629","Conciliado"),
-        ("2026-03-06","Compra Microsoft#g144371480","11192629 (T:5829)","cargo",55505.39,"Software contables","51959501","Servicios online / Software","Microsoft","","Conciliado"),
-        ("2026-03-06","Otro Movimiento de Depósito","6937668 (T:5829)","abono",148467.50,"","","","","","Pendiente"),
-        ("2026-03-06","GMF","11519447","cargo",593.87,"Impuestos no acreditables","54100501","Gastos por impuestos no acreditables","Global66","GMF Microsoft 11192676","Conciliado"),
-        ("2026-03-06","Compra Microsoft#g144431070","11192676 (T:5829)","cargo",148467.50,"Software contables","51959501","Servicios online / Software","Microsoft","","Conciliado"),
-        ("2026-03-07","Otro Movimiento de Depósito","29176285","abono",3316.83,"","","","","","Pendiente"),
-        ("2026-03-13","GMF","11721009","cargo",185.89,"Impuestos no acreditables","54100501","","Global66","GMF Comcel 11353946","Conciliado"),
-        ("2026-03-13","Compra Comcel Domiciliacion M","11353946 (T:5829)","cargo",46472.00,"Teléfono","51353501","Servicios / Teléfono","Comcel / Claro","","Conciliado"),
-        ("2026-03-13","Otro Movimiento de Retiro","7050429","cargo",800000.00,"","","22xx / 5105xx / 3710xx","","","Pendiente"),
-        ("2026-03-13","Otro Movimiento de Retiro","7050430","cargo",800000.00,"","","22xx / 5105xx / 3710xx","","","Pendiente"),
-        ("2026-03-13","GMF","11728508","cargo",3200.00,"Impuestos no acreditables","54100501","","Global66","GMF retiro 7050429/7050430","Conciliado"),
-        ("2026-03-13","Otro Movimiento de Retiro","29472130","cargo",2400000.00,"","","22xx / 5105xx / 3710xx","","","Pendiente"),
-        ("2026-03-13","Otro Movimiento de Retiro","29472131","cargo",800000.00,"","","","","","Pendiente"),
-        ("2026-03-13","GMF","11728511 / 11728512 / 11728513","cargo",16000.00,"Impuestos no acreditables","54100501","","Global66","GMF retiros grandes 13/03","Conciliado"),
-        ("2026-03-13","IMPUESTO IVA","11728514 / 11728515","cargo",845.12,"IVA descontable","51157001","IVA descontable","Global66","IVA cobro por retiro 13/03","Conciliado"),
-        ("2026-03-13","COBRO POR RETIRO","11728516 / 11728517","cargo",4448.00,"Comisiones bancarias","53051501","Comisiones bancarias","Global66","Comisión retiro 13/03","Conciliado"),
-        ("2026-03-15","GMF","11793429","cargo",763.97,"Impuestos no acreditables","54100501","","Global66","GMF Movistar 11413473","Conciliado"),
-        ("2026-03-15","Compra Movistar Pagosepayco","11413473 (T:5829)","cargo",190992.00,"Teléfono","51353501","Servicios / Teléfono","Movistar Colombia","","Conciliado"),
-        ("2026-03-16","Otro Movimiento de Retiro","29590749","cargo",493849.32,"","","","","","Pendiente"),
-        ("2026-03-16","GMF","11813829","cargo",1975.40,"Impuestos no acreditables","54100501","","Global66","GMF retiro 29590749","Conciliado"),
-        ("2026-03-16","IMPUESTO IVA","11813830","cargo",420.28,"IVA descontable","51157001","","Global66","IVA cobro retiro 16/03","Conciliado"),
-        ("2026-03-16","COBRO POR RETIRO","11813832","cargo",2212.00,"Comisiones bancarias","53051501","","Global66","Comisión retiro 16/03","Conciliado"),
-        ("2026-03-17","Otro Movimiento de Retiro","29649567","cargo",109900.00,"","","","","","Pendiente"),
-        ("2026-03-17","GMF","11842042","cargo",439.60,"Impuestos no acreditables","54100501","","Global66","GMF retiro 29649567","Conciliado"),
-        ("2026-03-17","Otro Movimiento de Retiro","29659075","cargo",501864.00,"","","","","","Pendiente"),
-        ("2026-03-17","GMF","11846469","cargo",2007.46,"Impuestos no acreditables","54100501","","Global66","GMF retiro 29659075","Conciliado"),
-        ("2026-03-18","Otro Movimiento de Retiro","29706076","cargo",588180.23,"","","","","","Pendiente"),
-        ("2026-03-18","GMF","11867230","cargo",2352.73,"Impuestos no acreditables","54100501","","Global66","GMF retiro 29706076","Conciliado"),
-        ("2026-03-18","IMPUESTO IVA","11867231","cargo",421.04,"IVA descontable","51157001","","Global66","IVA cobro retiro 18/03","Conciliado"),
-        ("2026-03-18","COBRO POR RETIRO","11867232","cargo",2216.00,"Comisiones bancarias","53051501","","Global66","Comisión retiro 18/03","Conciliado"),
-        ("2026-03-18","Otro Movimiento de Retiro","29720162","cargo",3452466.33,"","","","","","Pendiente"),
-        ("2026-03-18","GMF","11873622","cargo",13809.87,"Impuestos no acreditables","54100501","","Global66","GMF retiro 29720162","Conciliado"),
-        ("2026-03-18","IMPUESTO IVA","11873623","cargo",421.80,"IVA descontable","51157001","","Global66","IVA cobro retiro grande 18/03","Conciliado"),
-        ("2026-03-18","COBRO POR RETIRO","11873624","cargo",2220.00,"Comisiones bancarias","53051501","","Global66","Comisión retiro grande 18/03","Conciliado"),
-        ("2026-03-19","Otro Movimiento de Retiro","7147213","cargo",15000.00,"","","","","","Pendiente"),
-        ("2026-03-19","GMF","11886069","cargo",60.00,"Impuestos no acreditables","54100501","","Global66","GMF retiro 7147213","Conciliado"),
-        ("2026-03-19","Otro Movimiento de Retiro","29748521","cargo",1032658.00,"","","","","","Pendiente"),
-        ("2026-03-19","GMF","11886072","cargo",4130.64,"Impuestos no acreditables","54100501","","Global66","GMF retiro 29748521","Conciliado"),
-        ("2026-03-19","IMPUESTO IVA","11886074","cargo",420.28,"IVA descontable","51157001","","Global66","IVA cobro retiro 19/03","Conciliado"),
-        ("2026-03-19","COBRO POR RETIRO","11886075","cargo",2212.00,"Comisiones bancarias","53051501","","Global66","Comisión retiro 19/03","Conciliado"),
-        ("2026-03-19","Otro Movimiento de Retiro","7155953","cargo",1000000.00,"","","","","","Pendiente"),
-        ("2026-03-19","GMF","11899106","cargo",4000.00,"Impuestos no acreditables","54100501","","Global66","GMF retiro 7155953","Conciliado"),
-        ("2026-03-20","Otro Movimiento de Depósito","65393","abono",21922329.62,"","","13050501 / 23550001","","","Pendiente"),
-        ("2026-03-30","Otro Movimiento de Retiro","30259280","cargo",3480000.00,"","","","","","Pendiente"),
-        ("2026-03-30","Otro Movimiento de Retiro","30259281","cargo",1059927.00,"","","","","","Pendiente"),
-        ("2026-03-30","Otro Movimiento de Retiro","7324627","cargo",859927.00,"","","","","","Pendiente"),
-        ("2026-03-30","GMF","12135988","cargo",13920.00,"Impuestos no acreditables","54100501","","Global66","GMF retiros 30/03 bloque 1","Conciliado"),
-        ("2026-03-30","Otro Movimiento de Retiro","7324628","cargo",3469095.00,"","","","","","Pendiente"),
-        ("2026-03-30","GMF + IVA + COBRO POR RETIRO","12135990-12135996","cargo",46594.56,"GMF / IVA / Comision","54100501 / 51157001 / 53051501","","Global66","Impuestos y comisiones bloque 30/03","Conciliado"),
-        ("2026-03-30","Otro Movimiento de Retiro","7324629","cargo",959927.00,"","","","","","Pendiente"),
-        ("2026-03-30","GMF","12136000","cargo",3839.71,"Impuestos no acreditables","54100501","","Global66","GMF retiro 7324629","Conciliado"),
-        ("2026-03-30","Otro Movimiento de Retiro (x3)","30259284 / 30259282 / 30259283","cargo",11694927.00,"","","","","Retiros $3,955,000+$1,859,927+$5,880,000","Pendiente"),
-        ("2026-03-30","GMF + IVA + COBRO cierre","12136003-12136013","cargo",68856.56,"GMF / IVA / Comision","54100501 / 51157001 / 53051501","","Global66","Impuestos y comisiones cierre 30/03","Conciliado"),
-        ("2026-03-31","Intereses del periodo","-","abono",45460.74,"Intereses","42100501","Financieros / Intereses","Global66","Rendimientos cuenta ahorro mar-2026","Conciliado"),
+        # Enero 2026
+        ("2026-01-02","Pago nómina enero 2026","NOM-2601","cargo",8500000,"Nómina","51050501","Gastos de personal / Nómina","Empleados TEST","Nómina mensual enero","Conciliado"),
+        ("2026-01-02","GMF 4x1000 nómina enero","GMF-2601","cargo",34000,"Impuestos no acreditables","54100501","Gravamen movimientos financieros","Bancolombia","GMF retiro nómina","Conciliado"),
+        ("2026-01-05","Ingreso cliente A - factura 001","ING-001","abono",12500000,"Ventas servicios","41050101","Ingresos por servicios","Cliente A SAS","Pago factura FV-001","Conciliado"),
+        ("2026-01-10","Pago arriendo oficina enero","ARR-001","cargo",3200000,"Arrendamientos","52040501","Gastos administrativos / Arriendo","Inmobiliaria XYZ","Arriendo piso 3","Conciliado"),
+        ("2026-01-15","Pago servicios públicos","SVC-001","cargo",580000,"Servicios públicos","52040201","Agua, luz, gas","EPM","Servicios enero","Conciliado"),
+        ("2026-01-20","Comisión bancaria enero","COM-001","cargo",45000,"Comisiones bancarias","53051501","Comisiones y gastos bancarios","Bancolombia","Cuota mantenimiento cuenta","Conciliado"),
+        ("2026-01-25","Ingreso cliente B - factura 002","ING-002","abono",8750000,"Ventas servicios","41050101","Ingresos por servicios","Cliente B LTDA","Pago factura FV-002","Conciliado"),
+        ("2026-01-31","Intereses cuenta ahorro enero","INT-001","abono",18500,"Intereses financieros","42100501","Financieros / Intereses","Bancolombia","Rendimientos enero","Conciliado"),
+        # Febrero 2026
+        ("2026-02-03","Pago nómina febrero 2026","NOM-2602","cargo",8500000,"Nómina","51050501","Gastos de personal / Nómina","Empleados TEST","Nómina mensual febrero","Conciliado"),
+        ("2026-02-03","GMF 4x1000 nómina febrero","GMF-2602","cargo",34000,"Impuestos no acreditables","54100501","Gravamen movimientos financieros","Bancolombia","GMF retiro nómina","Conciliado"),
+        ("2026-02-10","Pago proveedor tecnología","PRV-001","cargo",2800000,"Servicios de tecnología","51959501","Servicios online / Software","Proveedor Tech SAS","Licencias software feb","Conciliado"),
+        ("2026-02-14","Ingreso cliente C - factura 003","ING-003","abono",15000000,"Ventas servicios","41050101","Ingresos por servicios","Cliente C Corp","Pago factura FV-003","Conciliado"),
+        ("2026-02-20","Pago IVA bimestre ene-feb","IVA-001","cargo",1850000,"IVA por pagar","24080501","Obligaciones fiscales / IVA","DIAN","Declaración IVA bimestral","Conciliado"),
+        ("2026-02-28","Intereses cuenta ahorro febrero","INT-002","abono",19200,"Intereses financieros","42100501","Financieros / Intereses","Bancolombia","Rendimientos febrero","Conciliado"),
+        # Marzo 2026
+        ("2026-03-03","Pago nómina marzo 2026","NOM-2603","cargo",8500000,"Nómina","51050501","Gastos de personal / Nómina","Empleados TEST","Nómina mensual marzo","Conciliado"),
+        ("2026-03-03","GMF 4x1000 nómina marzo","GMF-2603","cargo",34000,"Impuestos no acreditables","54100501","Gravamen movimientos financieros","Bancolombia","GMF retiro nómina","Conciliado"),
+        ("2026-03-07","Ingreso cliente A - factura 004","ING-004","abono",13200000,"Ventas servicios","41050101","Ingresos por servicios","Cliente A SAS","Pago factura FV-004","Conciliado"),
+        ("2026-03-12","Pago publicidad digital","PUB-001","cargo",950000,"Publicidad y marketing","52900101","Gastos de ventas / Publicidad","Meta Ads","Pauta redes sociales","Pendiente"),
+        ("2026-03-15","Pago seguridad social","SEG-001","cargo",1250000,"Seguridad social","51050901","Aportes sociales","ADRES / AFP","Aportes marzo","Conciliado"),
+        ("2026-03-20","Devolución cliente B","DEV-001","cargo",500000,"Devoluciones en ventas","41059901","Notas crédito clientes","Cliente B LTDA","NC-001 ajuste factura","Pendiente"),
+        ("2026-03-25","Ingreso proyecto especial","ING-005","abono",25000000,"Ventas servicios","41050101","Ingresos por servicios","Cliente D Internacional","Proyecto alpha fase 1","Pendiente"),
+        ("2026-03-31","Intereses cuenta ahorro marzo","INT-003","abono",21000,"Intereses financieros","42100501","Financieros / Intereses","Bancolombia","Rendimientos marzo","Conciliado"),
+        # Abril 2026
+        ("2026-04-02","Pago nómina abril 2026","NOM-2604","cargo",8750000,"Nómina","51050501","Gastos de personal / Nómina","Empleados TEST","Nómina mensual abril + ajuste","Pendiente"),
+        ("2026-04-02","GMF 4x1000 nómina abril","GMF-2604","cargo",35000,"Impuestos no acreditables","54100501","Gravamen movimientos financieros","Bancolombia","GMF retiro nómina","Pendiente"),
+        ("2026-04-08","Pago arrendamiento oficina abril","ARR-002","cargo",3200000,"Arrendamientos","52040501","Gastos administrativos / Arriendo","Inmobiliaria XYZ","Arriendo piso 3","Pendiente"),
+        ("2026-04-15","Ingreso cliente E - factura 005","ING-006","abono",9800000,"Ventas servicios","41050101","Ingresos por servicios","Cliente E SAS","Pago factura FV-005","Pendiente"),
+        ("2026-04-20","Renovación dominio y hosting","TEC-001","cargo",320000,"Servicios de tecnología","51959501","Servicios online / Hosting","GoDaddy Colombia","Dominio anual + hosting","Pendiente"),
+        # Mayo 2026
+        ("2026-05-02","Pago nómina mayo 2026","NOM-2605","cargo",8750000,"Nómina","51050501","Gastos de personal / Nómina","Empleados TEST","Nómina mensual mayo","Pendiente"),
+        ("2026-05-02","GMF 4x1000 nómina mayo","GMF-2605","cargo",35000,"Impuestos no acreditables","54100501","Gravamen movimientos financieros","Bancolombia","GMF retiro nómina","Pendiente"),
+        ("2026-05-10","Ingreso cliente A - factura 006","ING-007","abono",14500000,"Ventas servicios","41050101","Ingresos por servicios","Cliente A SAS","Pago factura FV-006","Pendiente"),
+        ("2026-05-20","Pago IVA bimestre mar-abr","IVA-002","cargo",2100000,"IVA por pagar","24080501","Obligaciones fiscales / IVA","DIAN","Declaración IVA bimestral","Pendiente"),
+        # Junio 2026
+        ("2026-06-02","Pago nómina junio 2026","NOM-2606","cargo",8750000,"Nómina","51050501","Gastos de personal / Nómina","Empleados TEST","Nómina mensual junio","Pendiente"),
+        ("2026-06-02","GMF 4x1000 nómina junio","GMF-2606","cargo",35000,"Impuestos no acreditables","54100501","Gravamen movimientos financieros","Bancolombia","GMF retiro nómina","Pendiente"),
+        ("2026-06-04","Ingreso cliente B - factura 007","ING-008","abono",11200000,"Ventas servicios","41050101","Ingresos por servicios","Cliente B LTDA","Pago factura FV-007","Pendiente"),
     ]
-    return [make_tx(*r, tx_id=1001 + i) for i, r in enumerate(rows)]
+    return [make_tx(*r, tx_id=2001+i) for i, r in enumerate(rows)]
+
+# ── DEFAULT DATA ──────────────────────────────────────────────────────────────
+def _march_2026_txs() -> list:
+    rows = [
+        ("2026-03-03","Otro Movimiento de Retiro","28831783","cargo",6405200,"","Según destinatario","22xx","","","Pendiente"),
+        ("2026-03-03","GMF","11383614","cargo",12003.56,"Impuestos no acreditables","54100501","GMF 4x1000","Global66","GMF retiro 28831783","Conciliado"),
+        ("2026-03-03","Otro Movimiento de Depósito","62012","abono",18795319.37,"","","13050501","","","Pendiente"),
+        ("2026-03-05","Compra Comcel Domiciliacion M","11160098","cargo",276080,"Teléfono","51353501","Servicios / Teléfono","Comcel / Claro","","Conciliado"),
+        ("2026-03-05","Otro Movimiento de Depósito","28992772","abono",42143.91,"","","13050501","","","Pendiente"),
+        ("2026-03-06","Compra Microsoft#g143376191","11192582","cargo",56563.15,"Software contables","51959501","Servicios online / Software","Microsoft","","Conciliado"),
+        ("2026-03-06","GMF","11519323","cargo",226.26,"Impuestos no acreditables","54100501","GMF Microsoft","Global66","GMF Microsoft","Conciliado"),
+        ("2026-03-13","Compra Comcel Domiciliacion M","11353946","cargo",46472,"Teléfono","51353501","Servicios / Teléfono","Comcel / Claro","","Conciliado"),
+        ("2026-03-13","Otro Movimiento de Retiro","7050429","cargo",800000,"","","22xx","","","Pendiente"),
+        ("2026-03-15","Compra Movistar Pagosepayco","11413473","cargo",190992,"Teléfono","51353501","Servicios / Teléfono","Movistar Colombia","","Conciliado"),
+        ("2026-03-18","Otro Movimiento de Retiro","29720162","cargo",3452466.33,"","","","","","Pendiente"),
+        ("2026-03-20","Otro Movimiento de Depósito","65393","abono",21922329.62,"","","13050501","","","Pendiente"),
+        ("2026-03-31","Intereses del período","–","abono",45460.74,"Intereses","42100501","Financieros / Intereses","Global66","Rendimientos mar-2026","Conciliado"),
+    ]
+    return [make_tx(*r, tx_id=1001+i) for i, r in enumerate(rows)]
+
+
+def _empty_company(cid: str, name: str) -> dict:
+    return {"id": cid, "name": name, "currentPeriodId": None, "periods": {}}
 
 
 def _default_data() -> dict:
+    companies = {}
+    for c in COMPANIES:
+        companies[c["id"]] = _empty_company(c["id"], c["name"])
+
+    # Mercury LTDA: Marzo 2026
+    companies["mercury-ltda"]["currentPeriodId"] = "2026-03"
+    companies["mercury-ltda"]["periods"]["2026-03"] = {
+        "id": "2026-03", "nombre": "Marzo 2026",
+        "banco": "Global66 COP", "cuenta": "11200502",
+        "saldoInicial": 11351966.78,
+        "transactions": _march_2026_txs(),
+    }
+
+    # TEST: varios períodos 2026
+    companies["test"]["currentPeriodId"] = "2026-06"
+    for pid, pnom in [
+        ("2026-01","Enero 2026"),("2026-02","Febrero 2026"),
+        ("2026-03","Marzo 2026"),("2026-04","Abril 2026"),
+        ("2026-05","Mayo 2026"),("2026-06","Junio 2026"),
+    ]:
+        companies["test"]["periods"][pid] = {
+            "id": pid, "nombre": pnom,
+            "banco": "Bancolombia", "cuenta": "12345678",
+            "saldoInicial": 5000000.0, "transactions": [],
+        }
+    # Distribuir transacciones TEST
+    all_test = _test_txs()
+    for t in all_test:
+        pid = t["fecha"][:7]
+        if pid in companies["test"]["periods"]:
+            companies["test"]["periods"][pid]["transactions"].append(t)
+
     return {
-        "version": "1.0",
-        "currentPeriodId": "2026-03",
-        "alegra": {"email": "", "token": "", "bank_account_id": None},
-        "periods": {
-            "2026-03": {
-                "id": "2026-03",
-                "nombre": "Marzo 2026",
-                "banco": "Global66 COP",
-                "cuenta": "11200502",
-                "empresa": "Mercury Methods Ltda",
-                "saldoInicial": 11351966.78,
-                "transactions": _marzo_2026_txs(),
-            }
-        },
+        "version": "2.0",
+        "currentCompanyId": "mercury-ltda",
+        "alegra": {"email": "", "token": ""},
+        "users": {},
+        "companies": companies,
     }
 
 
-# ── PERSISTENCIA ─────────────────────────────────────────────────────────
+# ── MIGRATE V1 → V2 ───────────────────────────────────────────────────────────
+def _migrate(data: dict) -> dict:
+    if data.get("version") == "2.0":
+        return data
+    # v1 had periods at top level
+    old_periods = data.get("periods", {})
+    old_pid     = data.get("currentPeriodId")
+    new = _default_data()
+    if old_periods:
+        new["companies"]["mercury-ltda"]["periods"] = old_periods
+        new["companies"]["mercury-ltda"]["currentPeriodId"] = old_pid
+    new["alegra"] = data.get("alegra", {"email":"","token":""})
+    new["users"]  = data.get("users", {})
+    return new
+
+
+# ── PERSISTENCE ───────────────────────────────────────────────────────────────
 def load_data() -> dict:
     if DATA_FILE.exists():
         try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            with open(DATA_FILE, encoding="utf-8") as f:
+                raw = json.load(f)
+            data = _migrate(raw)
             mx = max(
-                (t.get("id", 0) for p in data["periods"].values() for t in p["transactions"]),
+                (t.get("id",0) for co in data["companies"].values()
+                 for p in co["periods"].values() for t in p["transactions"]),
                 default=1000,
             )
-            st.session_state["_id_ctr"] = mx
+            st.session_state["_id"] = mx
             return data
         except Exception:
             pass
@@ -204,800 +248,749 @@ def save_data(data: dict) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-# ── HELPERS ───────────────────────────────────────────────────────────────
+# ── HELPERS ───────────────────────────────────────────────────────────────────
 def fmt(n) -> str:
-    try:
-        return f"${float(n):,.2f}"
-    except Exception:
-        return "–"
+    try: return f"${float(n):,.2f}"
+    except: return "–"
 
 
-def cur_per(data: dict):
-    return data["periods"].get(data["currentPeriodId"])
+def cur_co(data: dict) -> dict | None:
+    return data["companies"].get(data.get("currentCompanyId",""))
 
 
-def totals(txs: list):
-    c = sum(t["monto"] for t in txs if t["tipo"] == "cargo")
-    a = sum(t["monto"] for t in txs if t["tipo"] == "abono")
+def cur_per(data: dict) -> dict | None:
+    co = cur_co(data)
+    if not co: return None
+    return co["periods"].get(co.get("currentPeriodId",""))
+
+
+def totals(txs: list) -> tuple:
+    c = sum(t["monto"] for t in txs if t["tipo"]=="cargo")
+    a = sum(t["monto"] for t in txs if t["tipo"]=="abono")
     return c, a
 
 
-def period_range(per: dict):
-    pid = per["id"]
-    y, m = int(pid[:4]), int(pid[5:7])
-    last = calendar.monthrange(y, m)[1]
-    return f"{pid}-01", f"{pid}-{last:02d}"
+def period_months(per: dict) -> list:
+    return sorted({t["fecha"][:7] for t in per["transactions"]})
 
 
 def filtered_txs(per: dict) -> list:
-    txs = per["transactions"]
-    mode  = st.session_state.get("filter_mode", "month")
-    fdate = st.session_state.get("filter_date", "")
-    bwm   = st.session_state.get("bw_month", "")
-    bwh   = st.session_state.get("bw_half", 1)
-    if mode == "month":
-        return txs
-    if mode == "day":
-        return [t for t in txs if t["fecha"] == fdate]
-    if mode == "week" and fdate:
-        d   = datetime.strptime(fdate, "%Y-%m-%d")
+    txs   = per["transactions"]
+    mode  = st.session_state.get("filter_mode","month")
+    fdate = st.session_state.get("filter_date","")
+    bwm   = st.session_state.get("bw_month","")
+    bwh   = st.session_state.get("bw_half",1)
+    if mode=="day"  and fdate: return [t for t in txs if t["fecha"]==fdate]
+    if mode=="week" and fdate:
+        d   = datetime.strptime(fdate,"%Y-%m-%d")
         mon = d - timedelta(days=d.weekday())
         sun = mon + timedelta(days=6)
-        return [t for t in txs if mon.date() <= datetime.strptime(t["fecha"], "%Y-%m-%d").date() <= sun.date()]
-    if mode == "biweek" and bwm:
+        return [t for t in txs if mon.date()<=datetime.strptime(t["fecha"],"%Y-%m-%d").date()<=sun.date()]
+    if mode=="biweek" and bwm:
         return [t for t in txs if t["fecha"].startswith(bwm) and
-                (int(t["fecha"][8:10]) <= 15 if bwh == 1 else int(t["fecha"][8:10]) > 15)]
+                (int(t["fecha"][8:10])<=15 if bwh==1 else int(t["fecha"][8:10])>15)]
     return txs
 
 
-# ── INIT SESSION STATE ────────────────────────────────────────────────────
+# ── SESSION STATE ─────────────────────────────────────────────────────────────
 def _init():
-    if "data"            not in st.session_state: st.session_state.data            = load_data()
-    if "filter_mode"     not in st.session_state: st.session_state.filter_mode     = "month"
-    if "filter_date"     not in st.session_state: st.session_state.filter_date     = date.today().isoformat()
-    if "bw_month"        not in st.session_state: st.session_state.bw_month        = ""
-    if "bw_half"         not in st.session_state: st.session_state.bw_half         = 1
-    if "dialog"          not in st.session_state: st.session_state.dialog          = None
-    if "edit_tx_id"      not in st.session_state: st.session_state.edit_tx_id      = None
-    # Auth
-    if "logged_in"       not in st.session_state: st.session_state.logged_in       = False
-    if "current_user"    not in st.session_state: st.session_state.current_user    = None
-    if "auth_step"       not in st.session_state: st.session_state.auth_step       = "login"
-    if "pending_email"   not in st.session_state: st.session_state.pending_email   = ""
-    if "pending_code"    not in st.session_state: st.session_state.pending_code    = ""
-    if "code_expiry"     not in st.session_state: st.session_state.code_expiry     = None
-    if "email_sent"       not in st.session_state: st.session_state.email_sent       = False
-    if "unverified_email" not in st.session_state: st.session_state.unverified_email = ""
+    ss = st.session_state
+    if "data"             not in ss: ss.data             = load_data()
+    if "filter_mode"      not in ss: ss.filter_mode      = "month"
+    if "filter_date"      not in ss: ss.filter_date      = date.today().isoformat()
+    if "bw_month"         not in ss: ss.bw_month         = ""
+    if "bw_half"          not in ss: ss.bw_half          = 1
+    if "dialog"           not in ss: ss.dialog           = None
+    if "edit_tx_id"       not in ss: ss.edit_tx_id       = None
+    if "logged_in"        not in ss: ss.logged_in        = False
+    if "current_user"     not in ss: ss.current_user     = None
+    if "auth_step"        not in ss: ss.auth_step        = "login"
+    if "pending_email"    not in ss: ss.pending_email    = ""
+    if "pending_code"     not in ss: ss.pending_code     = ""
+    if "code_expiry"      not in ss: ss.code_expiry      = None
+    if "email_sent"       not in ss: ss.email_sent       = False
+    if "unverified_email" not in ss: ss.unverified_email = ""
+    if "confirm_del_id"   not in ss: ss.confirm_del_id   = None
 
 
-# ── PANTALLA DE AUTENTICACIÓN ─────────────────────────────────────────────
+# ── IMPORT ────────────────────────────────────────────────────────────────────
+def _parse_csv(raw: str, sep: str) -> list:
+    txs, bad = [], 0
+    for line in raw.strip().splitlines():
+        r = [c.strip().strip('"') for c in line.split(sep)]
+        try:
+            fecha=r[0]; desc=r[1] if len(r)>1 else ""
+            if not fecha or not desc: bad+=1; continue
+            monto=float(r[4].replace(",",".")) if len(r)>4 else 0
+            if monto<=0: bad+=1; continue
+            tipo_r = r[3].lower() if len(r)>3 else "cargo"
+            tipo   = "cargo" if any(x in tipo_r for x in ["cargo","retiro","deb"]) else "abono"
+            txs.append(make_tx(fecha,desc,r[2] if len(r)>2 else "",tipo,monto,
+                               r[5] if len(r)>5 else "",r[6] if len(r)>6 else "",
+                               r[7] if len(r)>7 else "",r[8] if len(r)>8 else "",
+                               r[9] if len(r)>9 else "",r[10] if len(r)>10 else "Pendiente"))
+        except: bad+=1
+    return txs, bad
+
+
+def _parse_excel(file_bytes: bytes) -> tuple:
+    try:
+        df = pd.read_excel(io.BytesIO(file_bytes))
+        raw = "\t".join(df.columns)+"\n"
+        for _, row in df.iterrows():
+            raw += "\t".join(str(v) for v in row.values)+"\n"
+        return _parse_csv(raw, "\t")
+    except Exception as e:
+        return [], str(e)
+
+
+def _parse_pdf(file_bytes: bytes) -> tuple:
+    try:
+        import pdfplumber
+        txs, bad = [], 0
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            for page in pdf.pages:
+                tables = page.extract_tables()
+                for table in tables:
+                    for row in table:
+                        if not row or len(row) < 3: continue
+                        r = [str(c).strip() if c else "" for c in row]
+                        try:
+                            fecha = r[0]; desc = r[1]
+                            monto_str = next((x for x in r[2:] if x.replace(".","").replace(",","").replace("-","").strip().isdigit()), "0")
+                            monto = abs(float(monto_str.replace(",","").replace(".",""))) / 100
+                            if not fecha or len(fecha)<8 or monto<=0: bad+=1; continue
+                            txs.append(make_tx(fecha,desc,"","cargo",monto))
+                        except: bad+=1
+        return txs, bad
+    except Exception as e:
+        return [], str(e)
+
+
+# ── EXPORT ────────────────────────────────────────────────────────────────────
+def _export_csv(txs: list) -> bytes:
+    df = _txs_to_df(txs)
+    return df.to_csv(index=False).encode("utf-8-sig")
+
+
+def _export_excel(txs: list) -> bytes:
+    df = _txs_to_df(txs)
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        df.to_excel(w, index=False, sheet_name="Conciliacion")
+    return buf.getvalue()
+
+
+def _export_pdf(txs: list, per: dict) -> bytes:
+    try:
+        from fpdf import FPDF
+        pdf = FPDF(orientation="L", unit="mm", format="A4")
+        pdf.add_page()
+        pdf.set_font("Helvetica","B",12)
+        pdf.cell(0,8,f"Conciliacion Bancaria - {per.get('nombre','')}",ln=True)
+        pdf.set_font("Helvetica","",7)
+        headers = ["Fecha","Descripcion","Ref","Cargo","Abono","Concepto","Cuenta","Origen","Estado"]
+        widths  = [22,60,28,22,22,30,22,30,22]
+        pdf.set_fill_color(44,62,80); pdf.set_text_color(255,255,255)
+        for h,w in zip(headers,widths):
+            pdf.cell(w,7,h,border=1,fill=True)
+        pdf.ln()
+        pdf.set_text_color(0,0,0); pdf.set_font("Helvetica","",6)
+        for t in txs:
+            cargo = fmt(t["monto"]) if t["tipo"]=="cargo" else "0"
+            abono = fmt(t["monto"]) if t["tipo"]=="abono" else "0"
+            vals  = [t["fecha"],t["descripcion"][:40],t["movimiento"][:14],
+                     cargo,abono,t["concepto"][:20],t["cuenta"][:12],
+                     t.get("origen",t.get("contacto",""))[:18],t["estado"]]
+            pdf.set_fill_color(245,245,245) if txs.index(t)%2==0 else pdf.set_fill_color(255,255,255)
+            for v,w in zip(vals,widths):
+                pdf.cell(w,6,str(v),border=1,fill=True)
+            pdf.ln()
+        return bytes(pdf.output())
+    except Exception as e:
+        return f"Error PDF: {e}".encode()
+
+
+def _txs_to_df(txs: list) -> pd.DataFrame:
+    rows = []
+    for t in txs:
+        rows.append({
+            "Fecha":       t["fecha"],
+            "Descripcion": t["descripcion"],
+            "N Movimiento":t["movimiento"],
+            "Cargo":       t["monto"] if t["tipo"]=="cargo" else 0,
+            "Abono":       t["monto"] if t["tipo"]=="abono" else 0,
+            "Concepto Alegra": t["concepto"],
+            "Cuenta Contable": t["cuenta"],
+            "Ref Cuenta":  t["cuentaRef"],
+            "Origen/Destino": t.get("origen",t.get("contacto","")),
+            "Notas":       t["nota"],
+            "Estado":      t["estado"],
+        })
+    return pd.DataFrame(rows)
+
+
+# ── AUTH PAGE ─────────────────────────────────────────────────────────────────
 def _auth_page():
     data = st.session_state.data
-
-    st.markdown("""
-    <div class="auth-card">
-      <div class="auth-header">
-        <div style="font-size:2rem;">🏦</div>
-        <h2 style="margin:8px 0 4px;font-size:1.2rem;">Conciliación Bancaria</h2>
-        <p style="margin:0;opacity:.75;font-size:.8rem;">Mercury Methods Ltda</p>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown('<div class="auth-header"><div style="font-size:2rem">🏦</div>'
+                '<h2 style="margin:8px 0 4px;font-size:1.2rem">Conciliación Bancaria</h2>'
+                '<p style="margin:0;opacity:.75;font-size:.8rem">Mercury Methods Ltda</p></div>',
+                unsafe_allow_html=True)
 
     step = st.session_state.auth_step
 
-    # ── PASO 1: Login / Registro ────────────────────────────────────────
     if step == "login":
-        tab_login, tab_reg = st.tabs(["Iniciar sesión", "Registrarse"])
+        tab_in, tab_reg = st.tabs(["Iniciar sesión","Registrarse"])
 
-        with tab_login:
+        with tab_in:
             with st.form("form_login"):
-                email    = st.text_input("Correo electrónico", placeholder="correo@empresa.com")
+                email    = st.text_input("Correo", placeholder="correo@empresa.com")
                 password = st.text_input("Contraseña", type="password")
-                submitted = st.form_submit_button("Ingresar", use_container_width=True, type="primary")
-
-            if submitted:
+                sub = st.form_submit_button("Ingresar", use_container_width=True, type="primary")
+            if sub:
                 ok, err = _auth.authenticate(data, email, password)
                 if ok:
-                    st.session_state.logged_in       = True
-                    st.session_state.current_user    = email.strip().lower()
+                    st.session_state.logged_in    = True
+                    st.session_state.current_user = email.strip().lower()
                     st.session_state.unverified_email = ""
-                    save_data(data)
-                    st.rerun()
-                elif "pendiente de verificación" in err:
+                    save_data(data); st.rerun()
+                elif "pendiente" in err:
                     st.session_state.unverified_email = email.strip().lower()
                 else:
-                    st.error(err)
-                    st.session_state.unverified_email = ""
+                    st.error(err); st.session_state.unverified_email = ""
 
-            # Fuera del if submitted para que el botón funcione en su propio clic
             if st.session_state.get("unverified_email"):
-                st.warning("⚠️ Cuenta pendiente de verificación. Revise su correo o reenvíe el código.")
-                if st.button("📧 Reenviar código de verificación", use_container_width=True):
-                    em    = st.session_state.unverified_email
-                    code  = _auth.generate_code()
-                    sent, _ = _auth.send_code_email(em, code)
-                    st.session_state.pending_email    = em
-                    st.session_state.pending_code     = code
-                    st.session_state.code_expiry      = datetime.now() + timedelta(minutes=10)
-                    st.session_state.email_sent       = sent
-                    st.session_state.auth_step        = "verify"
-                    st.session_state.unverified_email = ""
+                st.warning("Cuenta pendiente de verificación.")
+                if st.button("📧 Reenviar código", use_container_width=True):
+                    em   = st.session_state.unverified_email
+                    code = _auth.generate_code()
+                    sent,_ = _auth.send_code_email(em,code)
+                    st.session_state.update(pending_email=em,pending_code=code,
+                        code_expiry=datetime.now()+timedelta(minutes=10),
+                        email_sent=sent, auth_step="verify", unverified_email="")
                     st.rerun()
 
         with tab_reg:
             with st.form("form_reg"):
-                name     = st.text_input("Nombre completo")
-                email    = st.text_input("Correo electrónico", placeholder="correo@empresa.com")
-                password = st.text_input("Contraseña (mín. 6 caracteres)", type="password")
-                confirm  = st.text_input("Confirmar contraseña", type="password")
-                submitted = st.form_submit_button("Registrarse", use_container_width=True, type="primary")
-            if submitted:
-                if password != confirm:
-                    st.error("Las contraseñas no coinciden.")
+                name  = st.text_input("Nombre completo")
+                email = st.text_input("Correo", placeholder="correo@empresa.com")
+                pw    = st.text_input("Contraseña (mín. 6 caracteres)", type="password")
+                pw2   = st.text_input("Confirmar contraseña", type="password")
+                sub   = st.form_submit_button("Registrarse", use_container_width=True, type="primary")
+            if sub:
+                if pw != pw2: st.error("Las contraseñas no coinciden.")
                 else:
-                    ok, err = _auth.register_user(data, email, password, name)
-                    if not ok:
-                        st.error(err)
+                    ok, err = _auth.register_user(data, email, pw, name)
+                    if not ok: st.error(err)
                     else:
-                        # Generar y enviar código
-                        code      = _auth.generate_code()
-                        sent, msg = _auth.send_code_email(email.strip().lower(), code)
-                        st.session_state.pending_email = email.strip().lower()
-                        st.session_state.pending_code  = code
-                        st.session_state.code_expiry   = datetime.now() + timedelta(minutes=10)
-                        st.session_state.email_sent    = sent
-                        st.session_state.auth_step     = "verify"
-                        save_data(data)
-                        st.rerun()
+                        code = _auth.generate_code()
+                        sent,_ = _auth.send_code_email(email.strip().lower(),code)
+                        st.session_state.update(pending_email=email.strip().lower(),
+                            pending_code=code, code_expiry=datetime.now()+timedelta(minutes=10),
+                            email_sent=sent, auth_step="verify")
+                        save_data(data); st.rerun()
 
-    # ── PASO 2: Verificar código ────────────────────────────────────────
     elif step == "verify":
-        email      = st.session_state.pending_email
-        email_sent = st.session_state.email_sent
-
-        if email_sent:
-            st.success(f"📧 Código enviado a **{email}** — revise su bandeja de entrada (y la carpeta de spam).")
+        em   = st.session_state.pending_email
+        sent = st.session_state.email_sent
+        if sent:
+            st.success(f"📧 Código enviado a **{em}**")
         else:
-            # SMTP no configurado: mostrar el código directamente en pantalla
-            st.warning("El servidor de correo no está configurado. Use el código que aparece abajo.")
+            st.warning("SMTP no configurado — use el código de abajo")
             st.markdown(
-                f"""
-                <div style="text-align:center;background:#f5f5f5;border-radius:8px;
-                            padding:20px;margin:12px 0;border:2px dashed #2c3e50;">
-                  <p style="margin:0 0 8px;color:#757575;font-size:.85rem;">Su código de verificación:</p>
-                  <span style="font-size:3rem;font-weight:700;letter-spacing:14px;color:#2c3e50;">
-                    {st.session_state.pending_code}
-                  </span>
-                  <p style="margin:8px 0 0;color:#757575;font-size:.78rem;">Válido por 10 minutos</p>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+                f'<div style="text-align:center;background:#f5f5f5;border-radius:8px;padding:20px;margin:10px 0;">'
+                f'<p style="color:#757575;margin:0 0 6px;font-size:.8rem">Código de verificación:</p>'
+                f'<span style="font-size:2.8rem;font-weight:700;letter-spacing:12px;color:#2c3e50">'
+                f'{st.session_state.pending_code}</span>'
+                f'<p style="color:#757575;margin:6px 0 0;font-size:.75rem">Válido 10 min</p></div>',
+                unsafe_allow_html=True)
 
         with st.form("form_verify"):
-            code_input = st.text_input("Ingrese el código de 6 dígitos", max_chars=6, placeholder="123456")
-            submitted  = st.form_submit_button("Verificar cuenta", use_container_width=True, type="primary")
-
-        if submitted:
+            code_in = st.text_input("Código de 6 dígitos", max_chars=6, placeholder="123456")
+            sub = st.form_submit_button("Verificar cuenta", use_container_width=True, type="primary")
+        if sub:
             if _auth.code_expired():
-                st.error("El código expiró. Vuelva al registro.")
-                st.session_state.auth_step = "login"
-                st.rerun()
-            elif code_input.strip() != st.session_state.pending_code:
-                st.error("Código incorrecto. Intente de nuevo.")
+                st.error("Código expirado. Vuelva al inicio.")
+                st.session_state.auth_step = "login"; st.rerun()
+            elif code_in.strip() != st.session_state.pending_code:
+                st.error("Código incorrecto.")
             else:
-                _auth.mark_verified(data, email)
-                st.session_state.logged_in    = True
-                st.session_state.current_user = email
-                st.session_state.auth_step    = "login"
-                st.session_state.pending_code = ""
-                save_data(data)
-                st.rerun()
+                _auth.mark_verified(data, em)
+                st.session_state.update(logged_in=True, current_user=em,
+                    auth_step="login", pending_code="")
+                save_data(data); st.rerun()
 
-        st.divider()
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("🔄 Reenviar código", use_container_width=True):
-                code      = _auth.generate_code()
-                sent, _   = _auth.send_code_email(email, code)
-                st.session_state.pending_code  = code
-                st.session_state.code_expiry   = datetime.now() + timedelta(minutes=10)
-                st.session_state.email_sent    = sent
-                st.rerun()
-        with col2:
-            if st.button("← Volver al login", use_container_width=True):
-                st.session_state.auth_step = "login"
-                st.rerun()
+        c1,c2 = st.columns(2)
+        if c1.button("🔄 Reenviar", use_container_width=True):
+            code=_auth.generate_code(); sent,_=_auth.send_code_email(em,code)
+            st.session_state.update(pending_code=code, email_sent=sent,
+                code_expiry=datetime.now()+timedelta(minutes=10)); st.rerun()
+        if c2.button("← Login", use_container_width=True):
+            st.session_state.auth_step="login"; st.rerun()
 
 
-# ── DIÁLOGO: PERÍODO ──────────────────────────────────────────────────────
-@st.dialog("Período de conciliación")
-def _dlg_period():
-    data  = st.session_state.data
-    edit  = (st.session_state.dialog == "edit_period")
-    per   = cur_per(data) if edit else None
-
-    st.subheader("Editar período" if edit else "Nuevo período")
-
-    nombre = st.text_input("Nombre *", value=per["nombre"] if per else "")
-    if edit:
-        st.text_input("ID período", value=per["id"], disabled=True)
-        pid = per["id"]
-    else:
-        pid = st.text_input("ID período (YYYY-MM) *", placeholder="2026-04", max_chars=7)
-
-    c1, c2 = st.columns(2)
-    with c1:
-        if per:
-            c_t, a_t = totals(per["transactions"])
-            default_si = per["saldoInicial"] - c_t + a_t if edit else per["saldoInicial"]
-        else:
-            default_si = 0.0
-        saldo_ini = st.number_input("Saldo inicial ($)", value=float(per["saldoInicial"]) if per else default_si, step=0.01)
-        banco     = st.selectbox("Banco", BANCOS, index=BANCOS.index(per["banco"]) if per and per["banco"] in BANCOS else 0)
-    with c2:
-        cuenta  = st.text_input("N° Cuenta", value=per.get("cuenta","") if per else "")
-        empresa = st.text_input("Empresa",   value=per.get("empresa","Mercury Methods Ltda") if per else "Mercury Methods Ltda")
-
-    ok_col, cancel_col = st.columns(2)
-    with cancel_col:
-        if st.button("Cancelar", use_container_width=True):
-            st.session_state.dialog = None
-            st.rerun()
-    with ok_col:
-        if st.button("Guardar", type="primary", use_container_width=True):
-            if not nombre.strip():
-                st.error("El nombre es requerido.")
-                return
-            if not edit:
-                if not pid or len(pid) != 7 or pid[4] != "-":
-                    st.error("ID inválido. Use formato YYYY-MM (ej: 2026-04).")
-                    return
-                if pid in data["periods"]:
-                    st.error(f"Ya existe un período con ID '{pid}'.")
-                    return
-                data["periods"][pid] = {
-                    "id": pid, "nombre": nombre, "banco": banco,
-                    "cuenta": cuenta, "empresa": empresa,
-                    "saldoInicial": saldo_ini, "transactions": [],
-                }
-                data["currentPeriodId"] = pid
-            else:
-                per.update({"nombre": nombre, "banco": banco,
-                            "cuenta": cuenta, "empresa": empresa,
-                            "saldoInicial": saldo_ini})
-            save_data(data)
-            st.session_state.dialog = None
-            st.rerun()
-
-
-# ── DIÁLOGO: TRANSACCIÓN ──────────────────────────────────────────────────
-@st.dialog("Movimiento bancario", width="large")  # noqa: E302
-def _dlg_tx():
-    data    = st.session_state.data
-    per     = cur_per(data)
-    edit_id = st.session_state.edit_tx_id
-    existing = next((t for t in per["transactions"] if t["id"] == edit_id), None) if edit_id is not None else None
-
-    st.subheader("Editar movimiento" if existing else "Agregar movimiento")
-
-    c1, c2 = st.columns(2)
-    with c1:
-        fecha = st.date_input(
-            "Fecha *",
-            value=datetime.strptime(existing["fecha"], "%Y-%m-%d").date() if existing else date.today(),
-        )
-        tipo  = st.selectbox("Tipo *", ["cargo", "abono"],
-                              index=0 if not existing or existing["tipo"] == "cargo" else 1)
-    with c2:
-        monto    = st.number_input("Monto * ($)", min_value=0.01, step=0.01,
-                                    value=float(existing["monto"]) if existing else 0.01)
-        movim    = st.text_input("N° Movimiento", value=existing.get("movimiento","") if existing else "")
-
-    desc = st.text_input("Descripción extracto *", value=existing.get("descripcion","") if existing else "")
-
-    c3, c4 = st.columns(2)
-    with c3:
-        concepto   = st.text_input("Concepto Alegra",  value=existing.get("concepto","")   if existing else "")
-        cuenta     = st.text_input("Cuenta contable",  value=existing.get("cuenta","")     if existing else "")
-        cuenta_ref = st.text_input("Ref. cuenta",      value=existing.get("cuentaRef","")  if existing else "")
-    with c4:
-        al_contacts = st.session_state.al_contacts
-        if al_contacts:
-            cur_ct = existing.get("contacto","") if existing else ""
-            opts   = ([cur_ct] + al_contacts) if cur_ct and cur_ct not in al_contacts else (al_contacts if al_contacts else [""])
-            contacto = st.selectbox("Contacto", opts,
-                                     index=opts.index(cur_ct) if cur_ct in opts else 0)
-        else:
-            contacto = st.text_input("Contacto", value=existing.get("contacto","") if existing else "")
-        estado = st.selectbox("Estado", ESTADOS,
-                               index=ESTADOS.index(existing["estado"]) if existing and existing["estado"] in ESTADOS else 0)
-        nota   = st.text_input("Notas", value=existing.get("nota","") if existing else "")
-
-    ok_col, cancel_col = st.columns(2)
-    with cancel_col:
-        if st.button("Cancelar", use_container_width=True):
-            st.session_state.dialog    = None
-            st.session_state.edit_tx_id = None
-            st.rerun()
-    with ok_col:
-        if st.button("Guardar", type="primary", use_container_width=True):
-            if not desc.strip():
-                st.error("La descripción es requerida.")
-                return
-            if monto <= 0:
-                st.error("El monto debe ser mayor a 0.")
-                return
-            t = make_tx(fecha.isoformat(), desc, movim, tipo, monto,
-                        concepto, cuenta, cuenta_ref, contacto, nota, estado,
-                        tx_id=edit_id)
-            if existing:
-                idx = next(i for i, x in enumerate(per["transactions"]) if x["id"] == edit_id)
-                per["transactions"][idx] = t
-            else:
-                per["transactions"].append(t)
-            save_data(data)
-            st.session_state.dialog    = None
-            st.session_state.edit_tx_id = None
-            st.rerun()
-
-
-# ── DIÁLOGO: CSV ──────────────────────────────────────────────────────────
-@st.dialog("Importar extracto bancario (CSV)", width="large")
-def _dlg_csv():
-    data = st.session_state.data
-    per  = cur_per(data)
-
-    st.markdown(
-        "**Columnas:** Fecha · Descripción · N°Movimiento · Tipo (cargo/abono) · "
-        "Monto · Concepto · CuentaContable · RefCuenta · Contacto · Nota · Estado"
-    )
-    sep_label = st.radio("Separador", [",", ";", "Tab"], horizontal=True)
-    sep = "\t" if sep_label == "Tab" else sep_label
-
-    tab_file, tab_text = st.tabs(["Subir archivo", "Pegar texto"])
-    raw = ""
-    with tab_file:
-        f = st.file_uploader("Archivo CSV / TXT", type=["csv","txt"])
-        if f:
-            raw = f.read().decode("utf-8", errors="replace")
-    with tab_text:
-        raw = st.text_area("Contenido CSV", height=150,
-                            placeholder="2026-04-01,Retiro nomina,30000000,cargo,5000000") or raw
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        if st.button("Vista previa"):
-            if raw.strip():
-                lines = [ln.split(sep) for ln in raw.strip().splitlines() if ln.strip()]
-                cols  = ["Fecha","Desc","N°Mov","Tipo","Monto","Concepto","Cuenta","RefCta","Contacto","Nota","Estado"]
-                n     = min(len(cols), len(lines[0])) if lines else 0
-                st.dataframe(pd.DataFrame(lines[:10], columns=cols[:n]), use_container_width=True)
-    with c2:
-        if st.button("Cancelar"):
-            st.session_state.dialog = None
-            st.rerun()
-    with c3:
-        if st.button("Importar", type="primary"):
-            if not raw.strip():
-                st.error("Sin datos.")
-                return
-            ok = bad = 0
-            for line in raw.strip().splitlines():
-                r = [c.strip().strip('"') for c in line.split(sep)]
-                try:
-                    fecha = r[0]; desc = r[1] if len(r) > 1 else ""
-                    if not fecha or not desc:
-                        bad += 1; continue
-                    monto = float(r[4].replace(",",".")) if len(r) > 4 else 0
-                    if monto <= 0:
-                        bad += 1; continue
-                    tipo_raw = r[3].lower() if len(r) > 3 else "cargo"
-                    tipo = "cargo" if any(x in tipo_raw for x in ["cargo","retiro","deb"]) else "abono"
-                    per["transactions"].append(make_tx(
-                        fecha, desc,
-                        r[2] if len(r) > 2 else "",
-                        tipo, monto,
-                        r[5] if len(r) > 5 else "",
-                        r[6] if len(r) > 6 else "",
-                        r[7] if len(r) > 7 else "",
-                        r[8] if len(r) > 8 else "",
-                        r[9] if len(r) > 9 else "",
-                        r[10] if len(r) > 10 else "Pendiente",
-                    ))
-                    ok += 1
-                except Exception:
-                    bad += 1
-            save_data(data)
-            st.success(f"{ok} importados" + (f" ({bad} con errores)" if bad else ""))
-            st.session_state.dialog = None
-            st.rerun()
-
-
-# ── SIDEBAR ───────────────────────────────────────────────────────────────
+# ── SIDEBAR ───────────────────────────────────────────────────────────────────
 def _sidebar():
     data = st.session_state.data
-    per  = cur_per(data)
+    ss   = st.session_state
 
-    st.sidebar.markdown("## 🏦 Conciliación Bancaria\n**Mercury Methods Ltda**")
-
-    # Usuario logueado
-    user = st.session_state.get("current_user", "")
-    users = _auth.get_users(data)
-    name  = users.get(user, {}).get("name", "") or user
-    st.sidebar.caption(f"👤 {name}")
+    # Usuario
+    users   = _auth.get_users(data)
+    uname   = users.get(ss.current_user,{}).get("name","") or ss.current_user
+    st.sidebar.markdown(f"### 🏦 Mercury Methods\n👤 **{uname}**")
     if st.sidebar.button("Cerrar sesión", use_container_width=True):
-        st.session_state.logged_in    = False
-        st.session_state.current_user = None
-        st.rerun()
-
+        ss.logged_in=False; ss.current_user=None; st.rerun()
     st.sidebar.divider()
 
-    # ── Período ────────────────────────────────────────────────────────
+    # ── Empresas ────────────────────────────────────────────────────────
+    st.sidebar.markdown("### 🏢 Empresas")
+    cur_co_id = data.get("currentCompanyId","")
+    for co in COMPANIES:
+        is_active = co["id"] == cur_co_id
+        label = f"{'▶ ' if is_active else ''}{co['name']}"
+        if st.sidebar.button(label, use_container_width=True,
+                              type="primary" if is_active else "secondary",
+                              key=f"co_{co['id']}"):
+            if co["id"] != cur_co_id:
+                data["currentCompanyId"] = co["id"]
+                save_data(data); st.rerun()
+    st.sidebar.divider()
+
+    # ── Período ─────────────────────────────────────────────────────────
+    co = cur_co(data)
+    if not co:
+        return
+
     st.sidebar.markdown("### 📅 Período")
-    periods = sorted(data["periods"].values(), key=lambda p: p["id"], reverse=True)
-    ids     = [p["id"] for p in periods]
-    labels  = [f"{p['nombre']} — {p['banco']}" for p in periods]
-    cur_idx = ids.index(data["currentPeriodId"]) if data["currentPeriodId"] in ids else 0
+    periods  = sorted(co["periods"].values(), key=lambda p: p["id"], reverse=True)
+    per_ids  = [p["id"] for p in periods]
+    per_lbls = [f"{p['nombre']} — {p['banco']}" for p in periods]
+    cur_pid  = co.get("currentPeriodId","")
+    cur_i    = per_ids.index(cur_pid) if cur_pid in per_ids else 0
 
-    new_idx = st.sidebar.selectbox(
-        "Período activo", range(len(labels)),
-        format_func=lambda i: labels[i], index=cur_idx,
-    )
-    if ids[new_idx] != data["currentPeriodId"]:
-        data["currentPeriodId"] = ids[new_idx]
-        save_data(data)
-        st.rerun()
+    sel_i = st.sidebar.selectbox("Período activo", range(len(per_lbls)),
+                                  format_func=lambda i: per_lbls[i], index=cur_i)
+    if per_ids[sel_i] != cur_pid:
+        co["currentPeriodId"] = per_ids[sel_i]
+        save_data(data); st.rerun()
 
+    per = cur_per(data)
     if per:
-        st.sidebar.caption(f"{per.get('empresa','')} | Cta: {per.get('cuenta','')}")
-        banco_idx = BANCOS.index(per["banco"]) if per["banco"] in BANCOS else 0
-        nuevo_banco = st.sidebar.selectbox("Banco", BANCOS, index=banco_idx)
-        if nuevo_banco != per["banco"]:
-            per["banco"] = nuevo_banco
-            save_data(data)
-            st.rerun()
+        st.sidebar.caption(f"Cta: {per.get('cuenta','–')}")
+        bi = BANCOS.index(per["banco"]) if per.get("banco") in BANCOS else 0
+        nb = st.sidebar.selectbox("Banco", BANCOS, index=bi)
+        if nb != per.get("banco"):
+            per["banco"] = nb; save_data(data); st.rerun()
 
-    col1, col2 = st.sidebar.columns(2)
-    if col1.button("➕ Nuevo",  use_container_width=True):
-        st.session_state.dialog = "new_period"
-        st.rerun()
-    if col2.button("✏️ Editar", use_container_width=True):
-        if per:
-            st.session_state.dialog = "edit_period"
-            st.rerun()
-
+    pc1,pc2 = st.sidebar.columns(2)
+    if pc1.button("➕ Nuevo", use_container_width=True):
+        ss.dialog="new_period"; st.rerun()
+    if pc2.button("✏️ Editar", use_container_width=True):
+        if per: ss.dialog="edit_period"; st.rerun()
     if per and st.sidebar.button("🗑️ Eliminar período", use_container_width=True):
-        if len(data["periods"]) <= 1:
-            st.sidebar.error("No se puede eliminar el único período.")
-        else:
-            st.session_state.dialog = "delete_period"
-            st.rerun()
+        if len(co["periods"])<=1: st.sidebar.error("No se puede eliminar el único período.")
+        else: ss.dialog="delete_period"; st.rerun()
 
     st.sidebar.divider()
 
-    # ── Alegra ─────────────────────────────────────────────────────────
+    # ── Alegra ──────────────────────────────────────────────────────────
     st.sidebar.markdown("### 🔗 Alegra")
-    cfg = data.setdefault("alegra", {"email": "", "token": ""})
-    connected = bool(cfg.get("email") and cfg.get("token"))
-    st.sidebar.caption("✅ Credenciales guardadas" if connected else "⚙️ Pendiente de configurar")
-
-    with st.sidebar.expander("Configurar conexión", expanded=not connected):
-        email = st.text_input("Email Alegra", value=cfg.get("email",""), key="al_email")
-        token = st.text_input("Token API", value=cfg.get("token",""), type="password", key="al_token")
-        st.caption("El token se obtiene en Alegra → Configuración → Mi perfil → Token de API")
-        if st.button("💾 Guardar credenciales", key="al_save", use_container_width=True):
-            cfg["email"] = email.strip()
-            cfg["token"] = token.strip()
-            save_data(data)
-            st.success("Credenciales guardadas.")
+    cfg = data.setdefault("alegra",{"email":"","token":""})
+    ok_al = bool(cfg.get("email") and cfg.get("token"))
+    st.sidebar.caption("✅ Credenciales OK" if ok_al else "⚙️ Sin configurar")
+    with st.sidebar.expander("Configurar"):
+        em2 = st.text_input("Email Alegra", value=cfg.get("email",""), key="al_em")
+        tk2 = st.text_input("Token API", value=cfg.get("token",""), type="password", key="al_tk")
+        if st.button("💾 Guardar", use_container_width=True, key="al_save"):
+            cfg["email"]=em2.strip(); cfg["token"]=tk2.strip()
+            save_data(data); st.success("Guardado")
 
     st.sidebar.divider()
 
-    # ── Export / Import ─────────────────────────────────────────────────
+    # ── Datos ────────────────────────────────────────────────────────────
     st.sidebar.markdown("### 📂 Datos")
-    st.sidebar.download_button(
-        "⬇️ Exportar JSON",
-        data=json.dumps(data, ensure_ascii=False, indent=2),
-        file_name=f"conciliacion_{date.today().isoformat()}.json",
-        mime="application/json", use_container_width=True,
-    )
-    uploaded = st.sidebar.file_uploader("⬆️ Importar JSON", type=["json"])
-    if uploaded:
+    st.sidebar.download_button("⬇️ Exportar JSON",
+        data=json.dumps(data,ensure_ascii=False,indent=2),
+        file_name=f"conciliacion_{date.today()}.json",
+        mime="application/json", use_container_width=True)
+    up = st.sidebar.file_uploader("⬆️ Importar JSON", type=["json"])
+    if up:
         try:
-            imported = json.load(uploaded)
-            if "periods" not in imported or "currentPeriodId" not in imported:
+            imp = json.load(up)
+            if "companies" not in imp and "periods" not in imp:
                 raise ValueError("Formato inválido")
-            st.session_state.data = imported
-            mx = max((t.get("id",0) for p in imported["periods"].values()
-                      for t in p["transactions"]), default=1000)
-            st.session_state["_id_ctr"] = mx
-            save_data(imported)
-            st.sidebar.success("Importado correctamente.")
-            st.rerun()
+            imp = _migrate(imp)
+            mx  = max((t.get("id",0) for co2 in imp["companies"].values()
+                       for p in co2["periods"].values() for t in p["transactions"]),default=1000)
+            ss["_id"]=mx; ss.data=imp; save_data(imp)
+            st.sidebar.success("Importado"); st.rerun()
         except Exception as e:
             st.sidebar.error(f"Error: {e}")
 
 
-# ── MÉTRICAS ──────────────────────────────────────────────────────────────
+# ── MÉTRICAS ──────────────────────────────────────────────────────────────────
 def _metrics(per: dict):
-    all_txs = per["transactions"]
-    c, a    = totals(all_txs)
-    sf      = per["saldoInicial"] - c + a
-    conc    = sum(1 for t in all_txs if t["estado"] == "Conciliado")
-    pend    = sum(1 for t in all_txs if t["estado"] == "Pendiente")
-    rev     = sum(1 for t in all_txs if t["estado"] == "En revisión")
-    cols    = st.columns(7)
-    labels  = ["Saldo inicial","Total cargos","Total abonos","Saldo final",
-               "Movimientos","Conciliados","Pendientes"]
-    values  = [fmt(per["saldoInicial"]), fmt(c), fmt(a), fmt(sf),
-               len(all_txs), conc, pend]
-    deltas  = [None, f"-{fmt(c)}", fmt(a), None, None, None,
-               f"+{rev} en rev." if rev else None]
-    delta_c = ["normal","inverse","normal","normal","normal","normal","inverse"]
-    for col, lbl, val, dlt, dc in zip(cols, labels, values, deltas, delta_c):
-        with col:
-            st.metric(lbl, val, delta=dlt, delta_color=dc)
+    txs   = per["transactions"]
+    c,a   = totals(txs)
+    sf    = per["saldoInicial"] - c + a
+    conc  = [t for t in txs if t["estado"]=="Conciliado"]
+    pend  = [t for t in txs if t["estado"]=="Pendiente"]
+    mc,ma = totals(conc)
+    monto_conc = mc + ma
+
+    cols = st.columns(7)
+    data_metrics = [
+        ("Saldo Inicial",      fmt(per["saldoInicial"]), None,          "normal"),
+        ("Total Cargos",       fmt(c),                   f"-{fmt(c)}",  "inverse"),
+        ("Total Abonos",       fmt(a),                   fmt(a),        "normal"),
+        ("Saldo Final",        fmt(sf),                  None,          "normal"),
+        ("Conciliados Alegra", len(conc),                None,          "normal"),
+        ("Monto Conciliado",   fmt(monto_conc),          None,          "normal"),
+        ("Pendientes",         len(pend),                None,          "inverse"),
+    ]
+    for col,(lbl,val,dlt,dc) in zip(cols,data_metrics):
+        with col: st.metric(lbl,val,delta=dlt,delta_color=dc)
 
 
-# ── FILTROS ───────────────────────────────────────────────────────────────
-def _filters(per: dict):
-    c1, c2, c3 = st.columns([4, 4, 3])
+# ── PERÍODO + FILTROS (combinados) ────────────────────────────────────────────
+def _period_filters(per: dict):
+    c1,c2,c3 = st.columns([4,4,3])
     with c1:
-        mode = st.radio("Ver por", ["Mes completo","Semana","Quincena","Día"],
-                         horizontal=True, key="filter_radio_r")
-        st.session_state.filter_mode = {
-            "Mes completo":"month","Semana":"week",
-            "Quincena":"biweek","Día":"day"
-        }[mode]
+        mode = st.radio("Vista",["Mes completo","Día","Semana","Quincena"],horizontal=True)
+        st.session_state.filter_mode = {"Mes completo":"month","Día":"day",
+                                         "Semana":"week","Quincena":"biweek"}[mode]
     with c2:
         m = st.session_state.filter_mode
-        if m == "day":
-            d = st.date_input("Fecha", key="fd_day_i")
+        if m=="day":
+            d = st.date_input("Fecha", key="fd_d")
             st.session_state.filter_date = d.isoformat()
-        elif m == "week":
-            d = st.date_input("Fecha en la semana", key="fd_week_i")
+        elif m=="week":
+            d = st.date_input("Fecha en semana", key="fd_w")
             st.session_state.filter_date = d.isoformat()
-            mon = d - timedelta(days=d.weekday())
-            sun = mon + timedelta(days=6)
-            st.caption(f"Semana: {mon.strftime('%d/%m')} – {sun.strftime('%d/%m/%Y')}")
-        elif m == "biweek":
+            mon = d-timedelta(days=d.weekday()); sun=mon+timedelta(days=6)
+            st.caption(f"{mon:%d/%m} – {sun:%d/%m/%Y}")
+        elif m=="biweek":
             months = sorted({t["fecha"][:7] for t in per["transactions"]})
-            mlabels = {ms: datetime(int(ms[:4]),int(ms[5:7]),1).strftime("%B %Y").capitalize()
-                       for ms in months}
             if months:
-                sel_m = st.selectbox("Mes", months, format_func=lambda m: mlabels.get(m,m),
-                                      key="bw_month_i")
-                st.session_state.bw_month = sel_m
-            st.session_state.bw_half = st.radio(
-                "Quincena", [1, 2],
-                format_func=lambda h: "1ª (1–15)" if h == 1 else "2ª (16–fin)",
-                horizontal=True, key="bw_half_i",
-            )
+                ms = st.selectbox("Mes",months,
+                    format_func=lambda m: datetime(int(m[:4]),int(m[5:]),1).strftime("%B %Y").capitalize(),
+                    key="bw_ms")
+                st.session_state.bw_month = ms
+            st.session_state.bw_half = st.radio("Q",[1,2],horizontal=True,
+                format_func=lambda h:"1ª (1–15)" if h==1 else "2ª (16–fin)",key="bw_h")
     with c3:
-        filt = filtered_txs(per)
-        fc, fa = totals(filt)
-        st.caption(
-            f"**{len(filt)}** movimientos\n\n"
-            f"Cargos: **{fmt(fc)}**  Abonos: **{fmt(fa)}**"
-        )
+        filt  = filtered_txs(per)
+        fc,fa = totals(filt)
+        st.caption(f"**{len(filt)}** mov.  |  Cargos **{fmt(fc)}**  |  Abonos **{fmt(fa)}**")
 
 
-# ── TABLA PRINCIPAL ───────────────────────────────────────────────────────
+# ── TABLA PRINCIPAL ───────────────────────────────────────────────────────────
 def _table(per: dict):
     data = st.session_state.data
-    txs  = sorted(filtered_txs(per), key=lambda t: (t["fecha"], t["id"]))
-
+    txs  = sorted(filtered_txs(per), key=lambda t:(t["fecha"],t["id"]))
     if not txs:
         st.info("Sin movimientos en este filtro.")
         return
 
     df = pd.DataFrame(txs)
-    df["Cargo ($)"] = df.apply(lambda r: r["monto"] if r["tipo"] == "cargo" else None, axis=1)
-    df["Abono ($)"] = df.apply(lambda r: r["monto"] if r["tipo"] == "abono" else None, axis=1)
+    df["Cargo ($)"] = df.apply(lambda r: r["monto"] if r["tipo"]=="cargo" else 0.0, axis=1)
+    df["Abono ($)"] = df.apply(lambda r: r["monto"] if r["tipo"]=="abono" else 0.0, axis=1)
+    df["Origen/Destino"] = df.apply(lambda r: r.get("origen") or r.get("contacto",""), axis=1)
 
-    display_cols = ["id","fecha","descripcion","movimiento","tipo",
-                    "Cargo ($)","Abono ($)","concepto","cuenta","cuentaRef",
-                    "contacto","nota","estado"]
-    df_view = df[display_cols].copy()
+    show_cols = ["id","fecha","descripcion","movimiento",
+                 "Cargo ($)","Abono ($)","concepto","cuenta","cuentaRef",
+                 "Origen/Destino","nota","estado"]
+    df_v = df[show_cols].copy()
 
     edited = st.data_editor(
-        df_view,
+        df_v,
         column_config={
-            "id":          None,
-            "fecha":       st.column_config.TextColumn("Fecha",        disabled=True),
-            "descripcion": st.column_config.TextColumn("Descripción",  disabled=True, width="large"),
-            "movimiento":  st.column_config.TextColumn("N° Mov.",      disabled=True),
-            "tipo":        st.column_config.SelectboxColumn("Tipo",    options=["cargo","abono"], disabled=True, width="small"),
-            "Cargo ($)":   st.column_config.NumberColumn("Cargo ($)",  disabled=True, format="$%,.2f"),
-            "Abono ($)":   st.column_config.NumberColumn("Abono ($)",  disabled=True, format="$%,.2f"),
-            "concepto":    st.column_config.TextColumn("Concepto Alegra"),
-            "cuenta":      st.column_config.TextColumn("Cuenta contable"),
-            "cuentaRef":   st.column_config.TextColumn("Ref. cuenta"),
-            "contacto":    st.column_config.TextColumn("Contacto"),
-            "nota":        st.column_config.TextColumn("Notas"),
-            "estado":      st.column_config.SelectboxColumn("Estado",  options=ESTADOS, width="medium"),
+            "id":            None,
+            "fecha":         st.column_config.TextColumn("Fecha",        disabled=True),
+            "descripcion":   st.column_config.TextColumn("Descripción",  disabled=True, width="large"),
+            "movimiento":    st.column_config.TextColumn("N° Mov.",      disabled=True),
+            "Cargo ($)":     st.column_config.NumberColumn("Cargo ($)",  disabled=True, format="$%,.2f"),
+            "Abono ($)":     st.column_config.NumberColumn("Abono ($)",  disabled=True, format="$%,.2f"),
+            "concepto":      st.column_config.TextColumn("Concepto Alegra"),
+            "cuenta":        st.column_config.TextColumn("Cuenta Contable"),
+            "cuentaRef":     st.column_config.TextColumn("Ref. Cuenta"),
+            "Origen/Destino":st.column_config.TextColumn("Origen/Destino"),
+            "nota":          st.column_config.TextColumn("Notas"),
+            "estado":        st.column_config.SelectboxColumn("Estado", options=ESTADOS, disabled=True),
         },
-        disabled=["fecha","descripcion","movimiento","tipo","Cargo ($)","Abono ($)"],
-        hide_index=True,
-        use_container_width=True,
-        num_rows="fixed",
-        key="tx_table",
+        disabled=["fecha","descripcion","movimiento","Cargo ($)","Abono ($)","estado"],
+        hide_index=True, use_container_width=True, num_rows="fixed", key="tx_tbl",
     )
 
-    # Aplicar edits inline (concepto, cuenta, contacto, nota, estado)
-    editable = ["concepto","cuenta","cuentaRef","contacto","nota","estado"]
-    id_map   = {t["id"]: t for t in per["transactions"]}
+    # Guardar edits inline
+    editable = ["concepto","cuenta","cuentaRef","nota"]
+    id_map   = {t["id"]:t for t in per["transactions"]}
     changed  = False
-    for i, row in edited.iterrows():
-        tid = df_view.iloc[i]["id"]
-        t   = id_map.get(tid)
-        if t is None:
-            continue
+    for i,row in edited.iterrows():
+        tid = df_v.iloc[i]["id"]; t = id_map.get(tid)
+        if not t: continue
+        # Origen/Destino
+        nv = row["Origen/Destino"] or ""
+        if t.get("origen",t.get("contacto","")) != nv:
+            t["origen"] = nv; changed=True
         for f in editable:
-            nv = row[f] if row[f] is not None else ""
+            nv = row[f] or ""
             if str(t.get(f,"")) != str(nv):
-                t[f] = nv
-                changed = True
-    if changed:
-        save_data(data)
+                t[f]=nv; changed=True
+    if changed: save_data(data)
 
-    fc, fa = totals(txs)
-    sf_all = per["saldoInicial"] - totals(per["transactions"])[0] + totals(per["transactions"])[1]
-    st.markdown(
-        f"**TOTALES ({len(txs)} mov.)** &nbsp;│&nbsp; "
-        f"Cargos: **{fmt(fc)}** &nbsp;│&nbsp; Abonos: **{fmt(fa)}** &nbsp;│&nbsp; "
-        f"Saldo calculado: **{fmt(sf_all)}**"
-    )
+    # ── Controles de fila ────────────────────────────────────────────────
+    st.markdown("---")
+    lbl = {t["id"]: f"{t['fecha']}  |  {t['descripcion'][:45]}  |  {fmt(t['monto'])} ({'↑' if t['tipo']=='abono' else '↓'})"
+           for t in txs}
+    ra1,ra2,ra3,_ = st.columns([5,1,1,2])
+    with ra1:
+        sel = st.selectbox("Seleccione fila para acción", list(lbl.keys()),
+                            format_func=lambda i:lbl[i], label_visibility="collapsed")
+    with ra2:
+        if st.button("＋ Agregar debajo", use_container_width=True, help="Insertar fila en blanco debajo"):
+            st.session_state.dialog    = "tx"
+            st.session_state.edit_tx_id = None
+            st.session_state.insert_after = sel
+            st.rerun()
+    with ra3:
+        if st.button("🗑 Eliminar", use_container_width=True, help="Eliminar esta fila"):
+            st.session_state.confirm_del_id = sel
+            st.rerun()
+
+    # Confirmar eliminación
+    if st.session_state.confirm_del_id:
+        did  = st.session_state.confirm_del_id
+        desc = lbl.get(did,"este movimiento")
+        st.warning(f"¿Eliminar **{desc}**?")
+        c1,c2,_ = st.columns([1,1,5])
+        if c1.button("Sí, eliminar", type="primary"):
+            per["transactions"] = [t for t in per["transactions"] if t["id"]!=did]
+            st.session_state.confirm_del_id = None
+            save_data(data); st.rerun()
+        if c2.button("Cancelar"):
+            st.session_state.confirm_del_id = None; st.rerun()
+
+    # ── Exportar (pie de tabla) ──────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("**Exportar:**")
+    e1,e2,e3,_ = st.columns([1,1,1,5])
+    today = date.today().isoformat()
+    with e1:
+        st.download_button("⬇️ CSV", _export_csv(txs),
+            f"conciliacion_{today}.csv","text/csv", use_container_width=True)
+    with e2:
+        st.download_button("⬇️ Excel", _export_excel(txs),
+            f"conciliacion_{today}.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True)
+    with e3:
+        pdf_bytes = _export_pdf(txs, per)
+        st.download_button("⬇️ PDF", pdf_bytes,
+            f"conciliacion_{today}.pdf","application/pdf", use_container_width=True)
 
 
-# ── PANEL ALEGRA ──────────────────────────────────────────────────────────
+# ── IMPORTAR ──────────────────────────────────────────────────────────────────
+def _import_section(per: dict):
+    data = st.session_state.data
+    st.markdown("**Importar extracto:**")
+    i1,i2,i3 = st.columns(3)
+
+    with i1:
+        csv_f = st.file_uploader("CSV", type=["csv","txt"], key="up_csv", label_visibility="collapsed")
+        if csv_f:
+            sep_c = st.radio("Sep.",["Coma","Punto y coma","Tab"],horizontal=True,key="sep_c")
+            sep   = {",":"Coma",";":"Punto y coma","\t":"Tab"}
+            sep_r = [k for k,v in sep.items() if v==sep_c][0]
+            raw   = csv_f.read().decode("utf-8",errors="replace")
+            txs,bad = _parse_csv(raw,sep_r)
+            if txs and st.button(f"Importar {len(txs)} filas CSV"):
+                per["transactions"].extend(txs); save_data(data)
+                st.success(f"✅ {len(txs)} importados" + (f" ({bad} errores)" if bad else "")); st.rerun()
+
+    with i2:
+        xls_f = st.file_uploader("Excel", type=["xlsx","xls"], key="up_xls", label_visibility="collapsed")
+        if xls_f:
+            txs,bad = _parse_excel(xls_f.read())
+            if txs and st.button(f"Importar {len(txs)} filas Excel"):
+                per["transactions"].extend(txs); save_data(data)
+                st.success(f"✅ {len(txs)} importados"); st.rerun()
+
+    with i3:
+        pdf_f = st.file_uploader("PDF", type=["pdf"], key="up_pdf", label_visibility="collapsed")
+        if pdf_f:
+            txs,bad = _parse_pdf(pdf_f.read())
+            st.caption(f"PDF: {len(txs)} filas detectadas, {bad} con error")
+            if txs and st.button(f"Importar {len(txs)} filas PDF"):
+                per["transactions"].extend(txs); save_data(data)
+                st.success(f"✅ {len(txs)} importados"); st.rerun()
+
+
+# ── DIÁLOGOS ─────────────────────────────────────────────────────────────────
+@st.dialog("Período de conciliación")
+def _dlg_period():
+    data = st.session_state.data
+    co   = cur_co(data)
+    edit = st.session_state.dialog=="edit_period"
+    per  = cur_per(data) if edit else None
+    st.subheader("Editar período" if edit else "Nuevo período")
+
+    nombre = st.text_input("Nombre *", value=per["nombre"] if per else "")
+    if edit:
+        st.text_input("ID", value=per["id"], disabled=True); pid=per["id"]
+    else:
+        pid = st.text_input("ID período (YYYY-MM)", placeholder="2026-07", max_chars=7)
+
+    c1,c2 = st.columns(2)
+    with c1:
+        si    = st.number_input("Saldo inicial ($)", value=float(per["saldoInicial"]) if per else 0.0, step=0.01)
+        banco = st.selectbox("Banco",BANCOS,index=BANCOS.index(per["banco"]) if per and per.get("banco") in BANCOS else 0)
+    with c2:
+        cuenta = st.text_input("N° Cuenta", value=per.get("cuenta","") if per else "")
+
+    oc,cc = st.columns(2)
+    if cc.button("Cancelar", use_container_width=True):
+        st.session_state.dialog=None; st.rerun()
+    if oc.button("Guardar", type="primary", use_container_width=True):
+        if not nombre.strip(): st.error("Nombre requerido."); return
+        if not edit:
+            if not pid or len(pid)!=7 or pid[4]!="-": st.error("ID inválido."); return
+            if pid in co["periods"]: st.error("Ya existe."); return
+            co["periods"][pid]={"id":pid,"nombre":nombre,"banco":banco,
+                                "cuenta":cuenta,"saldoInicial":si,"transactions":[]}
+            co["currentPeriodId"]=pid
+        else:
+            per.update({"nombre":nombre,"banco":banco,"cuenta":cuenta,"saldoInicial":si})
+        save_data(data); st.session_state.dialog=None; st.rerun()
+
+
+@st.dialog("Movimiento bancario", width="large")
+def _dlg_tx():
+    data    = st.session_state.data
+    per     = cur_per(data)
+    eid     = st.session_state.edit_tx_id
+    ex      = next((t for t in per["transactions"] if t["id"]==eid),None) if eid else None
+    st.subheader("Editar movimiento" if ex else "Agregar movimiento")
+
+    c1,c2 = st.columns(2)
+    with c1:
+        fecha = st.date_input("Fecha *", value=datetime.strptime(ex["fecha"],"%Y-%m-%d").date() if ex else date.today())
+        tipo  = st.selectbox("Tipo *",["cargo","abono"], index=0 if not ex or ex["tipo"]=="cargo" else 1)
+    with c2:
+        monto = st.number_input("Monto * ($)", min_value=0.01, step=0.01, value=float(ex["monto"]) if ex else 0.01)
+        mov   = st.text_input("N° Movimiento", value=ex.get("movimiento","") if ex else "")
+
+    desc = st.text_input("Descripción *", value=ex.get("descripcion","") if ex else "")
+    c3,c4 = st.columns(2)
+    with c3:
+        concepto   = st.text_input("Concepto Alegra",  value=ex.get("concepto","") if ex else "")
+        cuenta     = st.text_input("Cuenta Contable",  value=ex.get("cuenta","") if ex else "")
+        cuenta_ref = st.text_input("Ref. Cuenta",      value=ex.get("cuentaRef","") if ex else "")
+    with c4:
+        origen = st.text_input("Origen/Destino", value=ex.get("origen",ex.get("contacto","")) if ex else "")
+        estado = st.selectbox("Estado",ESTADOS, index=ESTADOS.index(ex["estado"]) if ex and ex["estado"] in ESTADOS else 0)
+        nota   = st.text_input("Notas", value=ex.get("nota","") if ex else "")
+
+    oc,cc = st.columns(2)
+    if cc.button("Cancelar", use_container_width=True):
+        st.session_state.dialog=None; st.session_state.edit_tx_id=None; st.rerun()
+    if oc.button("Guardar", type="primary", use_container_width=True):
+        if not desc.strip(): st.error("Descripción requerida."); return
+        t = make_tx(fecha.isoformat(),desc,mov,tipo,monto,concepto,cuenta,cuenta_ref,origen,nota,estado,tx_id=eid)
+        if ex:
+            idx = next(i for i,x in enumerate(per["transactions"]) if x["id"]==eid)
+            per["transactions"][idx]=t
+        else:
+            after = st.session_state.get("insert_after")
+            if after:
+                idx = next((i for i,x in enumerate(per["transactions"]) if x["id"]==after), len(per["transactions"])-1)
+                per["transactions"].insert(idx+1,t)
+                st.session_state.insert_after=None
+            else:
+                per["transactions"].append(t)
+        save_data(data); st.session_state.dialog=None; st.session_state.edit_tx_id=None; st.rerun()
+
+
+# ── ALEGRA PANEL ──────────────────────────────────────────────────────────────
 def _alegra_panel():
     data = st.session_state.data
-    cfg  = data.get("alegra", {})
-    connected = bool(cfg.get("email") and cfg.get("token"))
-
+    cfg  = data.get("alegra",{})
+    ok   = bool(cfg.get("email") and cfg.get("token"))
     st.markdown("### 🔗 Integración con Alegra")
-
-    if connected:
-        st.success(f"✅ Credenciales configuradas para **{cfg.get('email','')}**")
-    else:
-        st.warning("⚙️ Las credenciales de Alegra aún no están configuradas.")
-
+    if ok: st.success(f"✅ Credenciales configuradas — **{cfg.get('email','')}**")
+    else:  st.warning("⚙️ Credenciales no configuradas. Configure en el panel lateral.")
     st.markdown("""
-La integración con Alegra permite importar automáticamente movimientos contables
-y sincronizar el plan de cuentas y contactos directamente desde el software.
+**Para conectar:**
+1. Alegra → Configuración → Mi perfil → **Token de API**
+2. Copie el token y péguelo en **Panel lateral → Alegra → Configurar**
 
-**Para configurar la conexión:**
-1. Ingrese a **Alegra** → Configuración → Mi perfil → **Token de API**
-2. Copie el token generado
-3. En el panel lateral de esta app, expanda **"Configurar conexión"**
-4. Ingrese su email de Alegra y el token
-5. Haga clic en **Guardar credenciales**
-
-> La integración automática estará disponible próximamente.
+> Importación automática de movimientos disponible próximamente.
 """)
 
-    st.divider()
-    st.markdown("**Credenciales actuales:**")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.text_input("Email", value=cfg.get("email","") or "No configurado", disabled=True)
-    with c2:
-        st.text_input("Token", value="••••••••" if cfg.get("token") else "No configurado", disabled=True)
 
-
-# ── MAIN ──────────────────────────────────────────────────────────────────
+# ── MAIN ──────────────────────────────────────────────────────────────────────
 def main():
     _init()
 
-    # Si no está logueado, mostrar pantalla de auth y detener
     if not st.session_state.logged_in:
-        _auth_page()
-        return
+        _auth_page(); return
 
     _sidebar()
 
     data = st.session_state.data
+    co   = cur_co(data)
     per  = cur_per(data)
 
-    # ── Diálogos activos ──────────────────────────────────────────────
+    # Diálogos
     dlg = st.session_state.dialog
-    if dlg in ("new_period","edit_period"):
-        _dlg_period()
-    elif dlg == "tx":
-        if per:
-            _dlg_tx()
-    elif dlg == "csv":
-        if per:
-            _dlg_csv()
+    if dlg in ("new_period","edit_period"):  _dlg_period()
+    elif dlg == "tx":                        _dlg_tx()
     elif dlg == "delete_period":
-        # Confirmación inline (no usa st.dialog para que sea más directo)
-        st.warning(
-            f"¿Eliminar el período **{per['nombre']}**? Esta acción no se puede deshacer.",
-            icon="⚠️",
-        )
-        c1, c2, _ = st.columns([1,1,4])
-        if c1.button("Sí, eliminar", type="primary"):
-            del data["periods"][data["currentPeriodId"]]
-            data["currentPeriodId"] = list(data["periods"].keys())[0]
-            save_data(data)
-            st.session_state.dialog = None
-            st.rerun()
-        if c2.button("Cancelar"):
-            st.session_state.dialog = None
-            st.rerun()
-        return  # No renderizar el resto mientras se confirma
+        if per:
+            st.warning(f"¿Eliminar **{per['nombre']}**? No se puede deshacer.", icon="⚠️")
+            c1,c2,_ = st.columns([1,1,5])
+            if c1.button("Sí, eliminar", type="primary"):
+                del co["periods"][co["currentPeriodId"]]
+                co["currentPeriodId"] = list(co["periods"].keys())[0] if co["periods"] else None
+                st.session_state.dialog=None; save_data(data); st.rerun()
+            if c2.button("Cancelar"):
+                st.session_state.dialog=None; st.rerun()
+            return
+
+    if not co:
+        st.error("Seleccione una empresa en el panel lateral."); return
+
+    # Header
+    co_name = co.get("name","")
+    per_info = f"{per.get('nombre','')} | Cta: {per.get('cuenta','–')} | {per.get('banco','')}" if per else "Sin período"
+    st.markdown(
+        f'<div style="background:#2c3e50;color:#fff;padding:12px 20px;border-radius:8px;'
+        f'margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;">'
+        f'<strong style="font-size:1.05rem">🏦 Conciliación Bancaria — {co_name}</strong>'
+        f'<span style="font-size:.78rem;opacity:.75">{per_info}</span></div>',
+        unsafe_allow_html=True)
 
     if not per:
-        st.error("No hay períodos. Cree uno en el panel lateral.")
+        st.info("Este período no tiene datos. Cree un período en el panel lateral.")
         return
 
-    # ── Header ────────────────────────────────────────────────────────
-    st.markdown(
-        f"""<div style="background:#2c3e50;color:#fff;padding:12px 20px;border-radius:8px;
-            margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;">
-            <div>
-                <strong style="font-size:1.1rem;">Conciliación Bancaria</strong>
-                <span style="font-size:.8rem;opacity:.7;margin-left:12px;">
-                    {per.get('empresa','')} — {per.get('banco','')}
-                </span>
-            </div>
-            <div style="font-size:.8rem;opacity:.7;">{per.get('nombre','')} | Cta: {per.get('cuenta','')}</div>
-        </div>""",
-        unsafe_allow_html=True,
-    )
-
-    # ── Métricas ──────────────────────────────────────────────────────
+    # Métricas
     _metrics(per)
     st.markdown("")
 
-    # ── Filtros ───────────────────────────────────────────────────────
-    with st.expander("🔎 Filtros", expanded=True):
-        _filters(per)
-
-    # ── Acciones ──────────────────────────────────────────────────────
-    a1, a2, a3, _ = st.columns([1.4, 1.4, 1.2, 5])
-    with a1:
-        if st.button("➕ Agregar movimiento", use_container_width=True, type="primary"):
-            st.session_state.dialog    = "tx"
-            st.session_state.edit_tx_id = None
-            st.rerun()
-    with a2:
-        if st.button("📋 Importar CSV", use_container_width=True):
-            st.session_state.dialog = "csv"
-            st.rerun()
-    with a3:
-        if st.button("💾 Guardar", use_container_width=True):
-            save_data(data)
-            st.toast("Guardado ✅")
-
-    st.markdown("")
-
-    # ── Tabs ─────────────────────────────────────────────────────────
-    tab_mov, tab_alegra = st.tabs(["📊 Movimientos", "🔗 Sincronización Alegra"])
+    # Tabs
+    tab_mov, tab_per, tab_import, tab_alegra = st.tabs(
+        ["📊 Movimientos", "📅 Período y Filtros", "⬆️ Importar", "🔗 Alegra"])
 
     with tab_mov:
         _table(per)
-        st.divider()
-        st.markdown("**Editar o eliminar un movimiento:**")
-        txs_sorted = sorted(per["transactions"], key=lambda t: (t["fecha"], t["id"]))
-        if txs_sorted:
-            lbl = {t["id"]: f"{t['fecha']}  |  {t['descripcion'][:45]}  |  {fmt(t['monto'])} ({t['tipo']})"
-                   for t in txs_sorted}
-            sel = st.selectbox("Seleccione", list(lbl.keys()), format_func=lambda i: lbl[i],
-                                label_visibility="collapsed")
-            b1, b2, _ = st.columns([1,1,6])
-            if b1.button("✏️ Editar", key="row_edit"):
-                st.session_state.dialog    = "tx"
-                st.session_state.edit_tx_id = sel
-                st.rerun()
-            if b2.button("🗑️ Eliminar", key="row_del"):
-                per["transactions"] = [t for t in per["transactions"] if t["id"] != sel]
-                save_data(data)
-                st.toast("Movimiento eliminado 🗑️")
-                st.rerun()
+
+    with tab_per:
+        _period_filters(per)
+
+    with tab_import:
+        _import_section(per)
 
     with tab_alegra:
         _alegra_panel()
