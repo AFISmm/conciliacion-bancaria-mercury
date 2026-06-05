@@ -625,26 +625,30 @@ def _sidebar():
 
 # ── MÉTRICAS ──────────────────────────────────────────────────────────────────
 def _metrics(per: dict):
-    txs   = per["transactions"]
-    c,a   = totals(txs)
-    sf    = per["saldoInicial"] - c + a
-    conc  = [t for t in txs if t["estado"]=="Conciliado"]
-    pend  = [t for t in txs if t["estado"]=="Pendiente"]
-    mc,ma = totals(conc)
+    txs       = per["transactions"]
+    c, a      = totals(txs)
+    sf        = per["saldoInicial"] - c + a
+    conc      = [t for t in txs if t["estado"] == "Conciliado"]
+    pend      = [t for t in txs if t["estado"] == "Pendiente"]
+    mc, ma    = totals(conc)
+    pc, pa    = totals(pend)
     monto_conc = mc + ma
+    saldo_pend = pc - pa   # diferencia cargo vs abono de pendientes
 
-    cols = st.columns(7)
+    cols = st.columns(8)
     data_metrics = [
-        ("Saldo Inicial",      fmt(per["saldoInicial"]), None,          "normal"),
-        ("Total Cargos",       fmt(c),                   f"-{fmt(c)}",  "inverse"),
-        ("Total Abonos",       fmt(a),                   fmt(a),        "normal"),
-        ("Saldo Final",        fmt(sf),                  None,          "normal"),
-        ("Conciliados Alegra", len(conc),                None,          "normal"),
-        ("Monto Conciliado",   fmt(monto_conc),          None,          "normal"),
-        ("Pendientes",         len(pend),                None,          "inverse"),
+        ("Saldo Inicial",              fmt(per["saldoInicial"]), None,                          "normal"),
+        ("Total Cargos",               fmt(c),                   None,                          "normal"),
+        ("Total Abonos",               fmt(a),                   None,                          "normal"),
+        ("Saldo Final",                fmt(sf),                  None,                          "normal"),
+        ("Saldo Pend. por Conciliar",  fmt(abs(saldo_pend)),     f"{'Cargo' if saldo_pend>=0 else 'Abono'} neto", "off"),
+        ("Conciliados Alegra",         len(conc),                None,                          "normal"),
+        ("Monto Conciliado",           fmt(monto_conc),          None,                          "normal"),
+        ("Pendientes",                 len(pend),                None,                          "inverse"),
     ]
-    for col,(lbl,val,dlt,dc) in zip(cols,data_metrics):
-        with col: st.metric(lbl,val,delta=dlt,delta_color=dc)
+    for col, (lbl, val, dlt, dc) in zip(cols, data_metrics):
+        with col:
+            st.metric(lbl, val, delta=dlt, delta_color=dc)
 
 
 # ── PERÍODO + FILTROS (combinados) ────────────────────────────────────────────
@@ -734,8 +738,26 @@ def _table(per: dict):
                 t[f]=nv; changed=True
     if changed: save_data(data)
 
+    # ── Fila de totales ──────────────────────────────────────────────────
+    fc, fa   = totals(txs)
+    dif      = fa - fc
+    dif_col  = "#1e7e34" if dif >= 0 else "#b71c1c"
+    dif_lbl  = f"Diferencia (Abono − Cargo): <strong style='color:{dif_col}'>{fmt(abs(dif))}" \
+               f"{'&nbsp;▲' if dif>=0 else '&nbsp;▼'}</strong>"
+    st.markdown(
+        f"""<div style="background:#2c3e50;color:#fff;border-radius:0 0 8px 8px;
+                        padding:7px 14px;font-size:.82rem;font-weight:700;
+                        display:flex;gap:32px;align-items:center;margin-top:2px;">
+              <span>TOTAL &nbsp;({len(txs)} mov.)</span>
+              <span>Cargos:&nbsp;<span style='color:#ff9999'>{fmt(fc)}</span></span>
+              <span>Abonos:&nbsp;<span style='color:#90ee90'>{fmt(fa)}</span></span>
+              <span>{dif_lbl}</span>
+            </div>""",
+        unsafe_allow_html=True,
+    )
+
     # ── Barra de acciones ────────────────────────────────────────────────
-    st.markdown("---")
+    st.markdown("")
     b1, b2, b3, _ = st.columns([1.6, 1.4, 1.4, 4])
     with b1:
         pendientes = [t for t in per["transactions"] if t["estado"] == "Pendiente"]
