@@ -383,33 +383,40 @@ def _export_excel(txs: list) -> bytes:
 
 
 def _export_pdf(txs: list, per: dict) -> bytes:
+    import contextlib, io as _sio
+    buf = _sio.StringIO()
     try:
         from fpdf import FPDF
-        pdf = FPDF(orientation="L", unit="mm", format="A4")
-        pdf.add_page()
-        pdf.set_font("Helvetica","B",12)
-        pdf.cell(0,8,f"Conciliacion Bancaria - {per.get('nombre','')}",ln=True)
-        pdf.set_font("Helvetica","",7)
-        headers = ["Fecha","Descripcion","Ref","Cargo","Abono","Concepto","Cuenta","Origen","Estado"]
-        widths  = [22,60,28,22,22,30,22,30,22]
-        pdf.set_fill_color(44,62,80); pdf.set_text_color(255,255,255)
-        for h,w in zip(headers,widths):
-            pdf.cell(w,7,h,border=1,fill=True)
-        pdf.ln()
-        pdf.set_text_color(0,0,0); pdf.set_font("Helvetica","",6)
-        for t in txs:
-            cargo = fmt(t["monto"]) if t["tipo"]=="cargo" else "0"
-            abono = fmt(t["monto"]) if t["tipo"]=="abono" else "0"
-            vals  = [t["fecha"],t["descripcion"][:40],t["movimiento"][:14],
-                     cargo,abono,t["concepto"][:20],t["cuenta"][:12],
-                     t.get("origen",t.get("contacto",""))[:18],t["estado"]]
-            pdf.set_fill_color(245,245,245) if txs.index(t)%2==0 else pdf.set_fill_color(255,255,255)
-            for v,w in zip(vals,widths):
-                pdf.cell(w,6,str(v),border=1,fill=True)
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            pdf = FPDF(orientation="L", unit="mm", format="A4")
+            pdf.add_page()
+            pdf.set_font("Helvetica", "B", 12)
+            pdf.cell(0, 8, f"Conciliacion Bancaria - {per.get('nombre','')}", new_x="LMARGIN", new_y="NEXT")
+            pdf.set_font("Helvetica", "", 7)
+            headers = ["Fecha", "Descripcion", "Ref", "Cargo ($)", "Abono ($)", "Concepto", "Cuenta", "Origen/Destino", "Estado"]
+            widths  = [22, 60, 26, 24, 24, 32, 22, 34, 22]
+            pdf.set_fill_color(44, 62, 80); pdf.set_text_color(255, 255, 255)
+            for h, w in zip(headers, widths):
+                pdf.cell(w, 7, h, border=1, fill=True)
             pdf.ln()
-        return bytes(pdf.output())
+            pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 6)
+            for i, t in enumerate(txs):
+                cargo = fmt(t["monto"]) if t["tipo"] == "cargo" else "$0.00"
+                abono = fmt(t["monto"]) if t["tipo"] == "abono" else "$0.00"
+                vals  = [
+                    t["fecha"], t["descripcion"][:40], t["movimiento"][:14],
+                    cargo, abono, t.get("concepto","")[:22], t.get("cuenta","")[:12],
+                    t.get("origen", t.get("contacto",""))[:20], t["estado"],
+                ]
+                r, g, b = (245, 245, 245) if i % 2 == 0 else (255, 255, 255)
+                pdf.set_fill_color(r, g, b)
+                for v, w in zip(vals, widths):
+                    pdf.cell(w, 6, str(v), border=1, fill=True)
+                pdf.ln()
+            raw = pdf.output()
+        return bytes(raw) if raw is not None else b""
     except Exception as e:
-        return f"Error PDF: {e}".encode()
+        return f"Error generando PDF: {e}".encode("utf-8")
 
 
 def _txs_to_df(txs: list) -> pd.DataFrame:
@@ -693,18 +700,18 @@ def _table(per: dict):
     edited = st.data_editor(
         df_v,
         column_config={
-            "id":            None,
-            "fecha":         st.column_config.TextColumn("Fecha",        disabled=True),
-            "descripcion":   st.column_config.TextColumn("Descripción",  disabled=True, width="large"),
-            "movimiento":    st.column_config.TextColumn("N° Mov.",      disabled=True),
-            "Cargo ($)":     st.column_config.NumberColumn("Cargo ($)",  disabled=True, format="$%,.2f"),
-            "Abono ($)":     st.column_config.NumberColumn("Abono ($)",  disabled=True, format="$%,.2f"),
-            "concepto":      st.column_config.TextColumn("Concepto Alegra"),
-            "cuenta":        st.column_config.TextColumn("Cuenta Contable"),
-            "cuentaRef":     st.column_config.TextColumn("Ref. Cuenta"),
-            "Origen/Destino":st.column_config.TextColumn("Origen/Destino"),
-            "nota":          st.column_config.TextColumn("Notas"),
-            "estado":        st.column_config.SelectboxColumn("Estado", options=ESTADOS, disabled=True),
+            "id":             None,
+            "fecha":          st.column_config.TextColumn("Fecha",           disabled=True, width=88),
+            "descripcion":    st.column_config.TextColumn("Descripción",     disabled=True, width=200),
+            "movimiento":     st.column_config.TextColumn("N° Mov.",         disabled=True, width=110),
+            "Cargo ($)":      st.column_config.NumberColumn("Cargo ($)",     disabled=True, format="$%,.2f", width=110),
+            "Abono ($)":      st.column_config.NumberColumn("Abono ($)",     disabled=True, format="$%,.2f", width=110),
+            "concepto":       st.column_config.TextColumn("Concepto Alegra", width=130),
+            "cuenta":         st.column_config.TextColumn("Cta. Contable",   width=100),
+            "cuentaRef":      st.column_config.TextColumn("Ref. Cuenta",     width=120),
+            "Origen/Destino": st.column_config.TextColumn("Origen/Destino",  width=120),
+            "nota":           st.column_config.TextColumn("Notas",           width=120),
+            "estado":         st.column_config.SelectboxColumn("Estado",     options=ESTADOS, disabled=True, width=110),
         },
         disabled=["fecha","descripcion","movimiento","Cargo ($)","Abono ($)","estado"],
         hide_index=True, use_container_width=True, num_rows="fixed", key="tx_tbl",
@@ -791,18 +798,14 @@ def _table(per: dict):
 
     with exp_col:
         st.markdown("**⬇️ Exportar**")
-        e1, e2, e3 = st.columns(3)
-        with e1:
-            st.download_button("CSV", _export_csv(txs),
-                f"conciliacion_{today}.csv", "text/csv", use_container_width=True)
-        with e2:
-            st.download_button("Excel", _export_excel(txs),
-                f"conciliacion_{today}.xlsx",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True)
-        with e3:
-            st.download_button("PDF", _export_pdf(txs, per),
-                f"conciliacion_{today}.pdf", "application/pdf", use_container_width=True)
+        # Pre-calcular los bytes antes de crear columnas para evitar output a stdout
+        csv_bytes   = _export_csv(txs)
+        excel_bytes = _export_excel(txs)
+        pdf_bytes   = _export_pdf(txs, per)
+        e1, e2, e3  = st.columns(3)
+        e1.download_button("⬇️ CSV",   csv_bytes,   f"conciliacion_{today}.csv",  "text/csv", use_container_width=True)
+        e2.download_button("⬇️ Excel", excel_bytes, f"conciliacion_{today}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+        e3.download_button("⬇️ PDF",   pdf_bytes,   f"conciliacion_{today}.pdf",  "application/pdf", use_container_width=True)
 
 
 # _import_section eliminada — import integrado en pie de _table()
