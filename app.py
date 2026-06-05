@@ -250,7 +250,7 @@ def save_data(data: dict) -> None:
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 def fmt(n) -> str:
-    try: return f"${float(n):,.2f}"
+    try: return f"${float(n):,.0f}"
     except: return "–"
 
 
@@ -712,8 +712,8 @@ def _table(per: dict):
             "fecha":          st.column_config.TextColumn("Fecha",           disabled=True, width=88),
             "descripcion":    st.column_config.TextColumn("Descripción",     disabled=True, width=200),
             "movimiento":     st.column_config.TextColumn("N° Mov.",         disabled=True, width=110),
-            "Cargo ($)":      st.column_config.NumberColumn("Débito ($)",    disabled=True, format="$%,.2f", width=110),
-            "Abono ($)":      st.column_config.NumberColumn("Crédito ($)",   disabled=True, format="$%,.2f", width=110),
+            "Cargo ($)":      st.column_config.NumberColumn("Débito ($)",    disabled=True, format="$%,.0f", width=110),
+            "Abono ($)":      st.column_config.NumberColumn("Crédito ($)",   disabled=True, format="$%,.0f", width=110),
             "concepto":       st.column_config.TextColumn("Concepto Alegra", width=130),
             "cuenta":         st.column_config.TextColumn("Cta. Contable",   width=100),
             "cuentaRef":      st.column_config.TextColumn("Ref. Cuenta",     width=120),
@@ -743,11 +743,18 @@ def _table(per: dict):
     if changed: save_data(data)
 
     # ── Fila de totales ──────────────────────────────────────────────────
-    fc, fa    = totals(txs)
-    credito   = per["saldoInicial"] + fa   # Crédito = saldo inicial + suma créditos
-    dif       = credito - fc               # Diferencia = Crédito − Débito
-    dif_col   = "#90ee90" if dif >= 0 else "#ff9999"
-    dif_icon  = "▲" if dif >= 0 else "▼"
+    fc, fa   = totals(txs)
+    credito  = per["saldoInicial"] + fa          # Crédito = saldo inicial + créditos
+    dif      = credito - fc                       # Diferencia = Crédito − Débito
+    dif_abs  = round(abs(dif))
+    # Verde solo cuando la diferencia es exactamente cero (conciliado)
+    # Rojo en cualquier otro caso, independiente del signo
+    dif_col  = "#4caf50" if dif_abs == 0 else "#ff5252"
+    # Flecha indica dirección del desequilibrio:
+    # ▲ = más crédito que débito (sobra dinero / falta registrar débitos)
+    # ▼ = más débito que crédito (falta dinero / falta registrar créditos)
+    dif_icon = "▲" if dif >= 0 else "▼"
+    dif_txt  = "CONCILIADO ✓" if dif_abs == 0 else f"{fmt(dif_abs)}&nbsp;{dif_icon}"
     st.markdown(
         f"""<div style="background:#2c3e50;color:#fff;border-radius:0 0 8px 8px;
                         padding:7px 14px;font-size:.82rem;font-weight:700;
@@ -755,9 +762,10 @@ def _table(per: dict):
               <span>TOTAL &nbsp;({len(txs)} mov.)</span>
               <span>Débito:&nbsp;<span style='color:#ff9999'>{fmt(fc)}</span></span>
               <span>Crédito:&nbsp;<span style='color:#90ee90'>{fmt(credito)}</span>
-                <span style='font-size:.7rem;opacity:.75'>&nbsp;(incl. saldo inicial)</span></span>
-              <span>Diferencia (Créd − Déb):&nbsp;
-                <strong style='color:{dif_col}'>{fmt(abs(dif))}&nbsp;{dif_icon}</strong>
+                <span style='font-size:.68rem;opacity:.7'>&nbsp;(incl. saldo inicial)</span>
+              </span>
+              <span>Diferencia:&nbsp;
+                <strong style='color:{dif_col};font-size:.95rem'>{dif_txt}</strong>
               </span>
             </div>""",
         unsafe_allow_html=True,
