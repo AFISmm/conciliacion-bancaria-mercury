@@ -393,7 +393,7 @@ def _export_pdf(txs: list, per: dict) -> bytes:
             pdf.set_font("Helvetica", "B", 12)
             pdf.cell(0, 8, f"Conciliacion Bancaria - {per.get('nombre','')}", new_x="LMARGIN", new_y="NEXT")
             pdf.set_font("Helvetica", "", 7)
-            headers = ["Fecha", "Descripcion", "Ref", "Cargo ($)", "Abono ($)", "Concepto", "Cuenta", "Origen/Destino", "Estado"]
+            headers = ["Fecha", "Descripcion", "Ref", "Débito ($)", "Crédito ($)", "Concepto", "Cuenta", "Origen/Destino", "Estado"]
             widths  = [22, 60, 26, 24, 24, 32, 22, 34, 22]
             pdf.set_fill_color(44, 62, 80); pdf.set_text_color(255, 255, 255)
             for h, w in zip(headers, widths):
@@ -426,8 +426,8 @@ def _txs_to_df(txs: list) -> pd.DataFrame:
             "Fecha":       t["fecha"],
             "Descripcion": t["descripcion"],
             "N Movimiento":t["movimiento"],
-            "Cargo":       t["monto"] if t["tipo"]=="cargo" else 0,
-            "Abono":       t["monto"] if t["tipo"]=="abono" else 0,
+            "Débito":      t["monto"] if t["tipo"]=="cargo" else 0,
+            "Crédito":     t["monto"] if t["tipo"]=="abono" else 0,
             "Concepto Alegra": t["concepto"],
             "Cuenta Contable": t["cuenta"],
             "Ref Cuenta":  t["cuentaRef"],
@@ -635,16 +635,20 @@ def _metrics(per: dict):
     monto_conc = mc + ma
     saldo_pend = pc - pa   # diferencia cargo vs abono de pendientes
 
+    # Crédito total incluye saldo inicial
+    credito_total = per["saldoInicial"] + a
+    saldo_pend    = pc - pa   # débito neto pendiente
+
     cols = st.columns(8)
     data_metrics = [
-        ("Saldo Inicial",              fmt(per["saldoInicial"]), None,                          "normal"),
-        ("Total Cargos",               fmt(c),                   None,                          "normal"),
-        ("Total Abonos",               fmt(a),                   None,                          "normal"),
-        ("Saldo Final",                fmt(sf),                  None,                          "normal"),
-        ("Saldo Pend. por Conciliar",  fmt(abs(saldo_pend)),     f"{'Cargo' if saldo_pend>=0 else 'Abono'} neto", "off"),
-        ("Conciliados Alegra",         len(conc),                None,                          "normal"),
-        ("Monto Conciliado",           fmt(monto_conc),          None,                          "normal"),
-        ("Pendientes",                 len(pend),                None,                          "inverse"),
+        ("Saldo Inicial",              fmt(per["saldoInicial"]), None,                           "normal"),
+        ("Total Débito",               fmt(c),                   None,                           "normal"),
+        ("Total Crédito",              fmt(credito_total),       "(incl. saldo inicial)",         "off"),
+        ("Saldo Final",                fmt(sf),                  None,                           "normal"),
+        ("Saldo Pend. por Conciliar",  fmt(abs(saldo_pend)),     f"{'Débito' if saldo_pend>=0 else 'Crédito'} neto", "off"),
+        ("Conciliados Alegra",         len(conc),                None,                           "normal"),
+        ("Monto Conciliado",           fmt(monto_conc),          None,                           "normal"),
+        ("Pendientes",                 len(pend),                None,                           "inverse"),
     ]
     for col, (lbl, val, dlt, dc) in zip(cols, data_metrics):
         with col:
@@ -708,8 +712,8 @@ def _table(per: dict):
             "fecha":          st.column_config.TextColumn("Fecha",           disabled=True, width=88),
             "descripcion":    st.column_config.TextColumn("Descripción",     disabled=True, width=200),
             "movimiento":     st.column_config.TextColumn("N° Mov.",         disabled=True, width=110),
-            "Cargo ($)":      st.column_config.NumberColumn("Cargo ($)",     disabled=True, format="$%,.2f", width=110),
-            "Abono ($)":      st.column_config.NumberColumn("Abono ($)",     disabled=True, format="$%,.2f", width=110),
+            "Cargo ($)":      st.column_config.NumberColumn("Débito ($)",    disabled=True, format="$%,.2f", width=110),
+            "Abono ($)":      st.column_config.NumberColumn("Crédito ($)",   disabled=True, format="$%,.2f", width=110),
             "concepto":       st.column_config.TextColumn("Concepto Alegra", width=130),
             "cuenta":         st.column_config.TextColumn("Cta. Contable",   width=100),
             "cuentaRef":      st.column_config.TextColumn("Ref. Cuenta",     width=120),
@@ -739,19 +743,22 @@ def _table(per: dict):
     if changed: save_data(data)
 
     # ── Fila de totales ──────────────────────────────────────────────────
-    fc, fa   = totals(txs)
-    dif      = fa - fc
-    dif_col  = "#1e7e34" if dif >= 0 else "#b71c1c"
-    dif_lbl  = f"Diferencia (Abono − Cargo): <strong style='color:{dif_col}'>{fmt(abs(dif))}" \
-               f"{'&nbsp;▲' if dif>=0 else '&nbsp;▼'}</strong>"
+    fc, fa    = totals(txs)
+    credito   = per["saldoInicial"] + fa   # Crédito = saldo inicial + suma créditos
+    dif       = credito - fc               # Diferencia = Crédito − Débito
+    dif_col   = "#90ee90" if dif >= 0 else "#ff9999"
+    dif_icon  = "▲" if dif >= 0 else "▼"
     st.markdown(
         f"""<div style="background:#2c3e50;color:#fff;border-radius:0 0 8px 8px;
                         padding:7px 14px;font-size:.82rem;font-weight:700;
                         display:flex;gap:32px;align-items:center;margin-top:2px;">
               <span>TOTAL &nbsp;({len(txs)} mov.)</span>
-              <span>Cargos:&nbsp;<span style='color:#ff9999'>{fmt(fc)}</span></span>
-              <span>Abonos:&nbsp;<span style='color:#90ee90'>{fmt(fa)}</span></span>
-              <span>{dif_lbl}</span>
+              <span>Débito:&nbsp;<span style='color:#ff9999'>{fmt(fc)}</span></span>
+              <span>Crédito:&nbsp;<span style='color:#90ee90'>{fmt(credito)}</span>
+                <span style='font-size:.7rem;opacity:.75'>&nbsp;(incl. saldo inicial)</span></span>
+              <span>Diferencia (Créd − Déb):&nbsp;
+                <strong style='color:{dif_col}'>{fmt(abs(dif))}&nbsp;{dif_icon}</strong>
+              </span>
             </div>""",
         unsafe_allow_html=True,
     )
@@ -837,8 +844,8 @@ def _dlg_conciliar():
     df_p = pd.DataFrame([{
         "Fecha":       t["fecha"],
         "Descripción": t["descripcion"][:50],
-        "Cargo ($)":   fmt(t["monto"]) if t["tipo"] == "cargo" else "—",
-        "Abono ($)":   fmt(t["monto"]) if t["tipo"] == "abono" else "—",
+        "Débito ($)":  fmt(t["monto"]) if t["tipo"] == "cargo" else "—",
+        "Crédito ($)": fmt(t["monto"]) if t["tipo"] == "abono" else "—",
         "Concepto":    t.get("concepto",""),
     } for t in pendientes])
     st.dataframe(df_p, hide_index=True, use_container_width=True)
@@ -938,7 +945,9 @@ def _dlg_tx():
     c1,c2 = st.columns(2)
     with c1:
         fecha = st.date_input("Fecha *", value=datetime.strptime(ex["fecha"],"%Y-%m-%d").date() if ex else date.today())
-        tipo  = st.selectbox("Tipo *",["cargo","abono"], index=0 if not ex or ex["tipo"]=="cargo" else 1)
+        tipo_lbl = st.selectbox("Tipo *", ["Débito (Cargo)", "Crédito (Abono)"],
+                                index=0 if not ex or ex["tipo"] == "cargo" else 1)
+        tipo = "cargo" if tipo_lbl.startswith("Débito") else "abono"
     with c2:
         monto = st.number_input("Monto * ($)", min_value=0.01, step=0.01, value=float(ex["monto"]) if ex else 0.01)
         mov   = st.text_input("N° Movimiento", value=ex.get("movimiento","") if ex else "")
