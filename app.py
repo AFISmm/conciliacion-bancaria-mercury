@@ -734,37 +734,25 @@ def _table(per: dict):
                 t[f]=nv; changed=True
     if changed: save_data(data)
 
-    # ── Controles de fila ────────────────────────────────────────────────
+    # ── Barra de acciones ────────────────────────────────────────────────
     st.markdown("---")
-    lbl = {t["id"]: f"{t['fecha']}  |  {t['descripcion'][:45]}  |  {fmt(t['monto'])} ({'↑' if t['tipo']=='abono' else '↓'})"
-           for t in txs}
-    ra1,ra2,ra3,_ = st.columns([5,1,1,2])
-    with ra1:
-        sel = st.selectbox("Seleccione fila para acción", list(lbl.keys()),
-                            format_func=lambda i:lbl[i], label_visibility="collapsed")
-    with ra2:
-        if st.button("＋ Agregar debajo", use_container_width=True, help="Insertar fila en blanco debajo"):
-            st.session_state.dialog    = "tx"
+    b1, b2, b3, _ = st.columns([1.6, 1.4, 1.4, 4])
+    with b1:
+        pendientes = [t for t in per["transactions"] if t["estado"] == "Pendiente"]
+        label_conc = f"✅ Conciliar ({len(pendientes)} pendientes)"
+        if st.button(label_conc, use_container_width=True, type="primary",
+                     disabled=len(pendientes) == 0):
+            st.session_state.dialog = "conciliar"
+            st.rerun()
+    with b2:
+        if st.button("＋ Agregar movimiento", use_container_width=True):
+            st.session_state.dialog     = "tx"
             st.session_state.edit_tx_id = None
-            st.session_state.insert_after = sel
             st.rerun()
-    with ra3:
-        if st.button("🗑 Eliminar", use_container_width=True, help="Eliminar esta fila"):
-            st.session_state.confirm_del_id = sel
+    with b3:
+        if st.button("🗑 Eliminar movimiento", use_container_width=True):
+            st.session_state.dialog = "eliminar_tx"
             st.rerun()
-
-    # Confirmar eliminación
-    if st.session_state.confirm_del_id:
-        did  = st.session_state.confirm_del_id
-        desc = lbl.get(did,"este movimiento")
-        st.warning(f"¿Eliminar **{desc}**?")
-        c1,c2,_ = st.columns([1,1,5])
-        if c1.button("Sí, eliminar", type="primary"):
-            per["transactions"] = [t for t in per["transactions"] if t["id"]!=did]
-            st.session_state.confirm_del_id = None
-            save_data(data); st.rerun()
-        if c2.button("Cancelar"):
-            st.session_state.confirm_del_id = None; st.rerun()
 
     # ── Importar / Exportar (pie de tabla) ──────────────────────────────
     st.markdown("---")
@@ -812,6 +800,74 @@ def _table(per: dict):
 
 
 # ── DIÁLOGOS ─────────────────────────────────────────────────────────────────
+@st.dialog("Conciliar movimientos pendientes", width="large")
+def _dlg_conciliar():
+    data = st.session_state.data
+    per  = cur_per(data)
+    pendientes = [t for t in per["transactions"] if t["estado"] == "Pendiente"]
+
+    if not pendientes:
+        st.info("No hay movimientos pendientes.")
+        if st.button("Cerrar"): st.session_state.dialog = None; st.rerun()
+        return
+
+    st.markdown(f"Se conciliarán **{len(pendientes)}** movimientos pendientes:")
+    df_p = pd.DataFrame([{
+        "Fecha":       t["fecha"],
+        "Descripción": t["descripcion"][:50],
+        "Cargo ($)":   fmt(t["monto"]) if t["tipo"] == "cargo" else "—",
+        "Abono ($)":   fmt(t["monto"]) if t["tipo"] == "abono" else "—",
+        "Concepto":    t.get("concepto",""),
+    } for t in pendientes])
+    st.dataframe(df_p, hide_index=True, use_container_width=True)
+
+    c_tot, a_tot = totals(pendientes)
+    st.caption(f"Total cargos a conciliar: **{fmt(c_tot)}** · Total abonos: **{fmt(a_tot)}**")
+
+    ok_col, cancel_col = st.columns(2)
+    with cancel_col:
+        if st.button("Cancelar", use_container_width=True):
+            st.session_state.dialog = None; st.rerun()
+    with ok_col:
+        if st.button("✅ Confirmar conciliación", type="primary", use_container_width=True):
+            for t in per["transactions"]:
+                if t["estado"] == "Pendiente":
+                    t["estado"] = "Conciliado"
+            save_data(data)
+            st.session_state.dialog = None
+            st.rerun()
+
+
+@st.dialog("Eliminar movimiento")
+def _dlg_eliminar_tx():
+    data = st.session_state.data
+    per  = cur_per(data)
+    txs_sorted = sorted(per["transactions"], key=lambda t: (t["fecha"], t["id"]))
+
+    if not txs_sorted:
+        st.info("No hay movimientos.")
+        if st.button("Cerrar"): st.session_state.dialog = None; st.rerun()
+        return
+
+    lbl = {t["id"]: f"{t['fecha']}  |  {t['descripcion'][:45]}  |  {fmt(t['monto'])} ({'Abono' if t['tipo']=='abono' else 'Cargo'})"
+           for t in txs_sorted}
+
+    sel = st.selectbox("Seleccione el movimiento a eliminar",
+                       list(lbl.keys()), format_func=lambda i: lbl[i])
+
+    st.warning("Esta acción no se puede deshacer.")
+    ok_col, cancel_col = st.columns(2)
+    with cancel_col:
+        if st.button("Cancelar", use_container_width=True):
+            st.session_state.dialog = None; st.rerun()
+    with ok_col:
+        if st.button("🗑 Eliminar", type="primary", use_container_width=True):
+            per["transactions"] = [t for t in per["transactions"] if t["id"] != sel]
+            save_data(data)
+            st.session_state.dialog = None
+            st.rerun()
+
+
 @st.dialog("Período de conciliación")
 def _dlg_period():
     data = st.session_state.data
@@ -948,6 +1004,8 @@ def main():
     dlg = st.session_state.dialog
     if dlg in ("new_period","edit_period"):  _dlg_period()
     elif dlg == "tx":                        _dlg_tx()
+    elif dlg == "conciliar":                 _dlg_conciliar()
+    elif dlg == "eliminar_tx":               _dlg_eliminar_tx()
     elif dlg == "delete_period":
         if per:
             st.warning(f"¿Eliminar **{per['nombre']}**? No se puede deshacer.", icon="⚠️")
