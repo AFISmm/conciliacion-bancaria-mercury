@@ -722,28 +722,29 @@ def _table(per: dict):
             "cuentaRef":      st.column_config.TextColumn("Ref. Cuenta",     width=120),
             "Origen/Destino": st.column_config.TextColumn("Origen/Destino",  width=120),
             "nota":           st.column_config.TextColumn("Notas",           width=120),
-            "estado":         st.column_config.SelectboxColumn("Estado",     options=ESTADOS, disabled=True, width=110),
+            "estado":         st.column_config.SelectboxColumn("Estado",     options=ESTADOS, width=130),
         },
-        disabled=["fecha","descripcion","movimiento","Cargo ($)","Abono ($)","estado"],
+        disabled=["fecha","descripcion","movimiento","Cargo ($)","Abono ($)"],
         hide_index=True, use_container_width=True, num_rows="fixed", key="tx_tbl",
     )
 
-    # Guardar edits inline
-    editable = ["concepto","cuenta","cuentaRef","nota"]
+    # Guardar edits inline (incluye Estado ahora editable)
+    editable = ["concepto","cuenta","cuentaRef","nota","estado"]
     id_map   = {t["id"]:t for t in per["transactions"]}
     changed  = False
-    for i,row in edited.iterrows():
+    for i, row in edited.iterrows():
         tid = df_v.iloc[i]["id"]; t = id_map.get(tid)
         if not t: continue
         # Origen/Destino
         nv = row["Origen/Destino"] or ""
-        if t.get("origen",t.get("contacto","")) != nv:
-            t["origen"] = nv; changed=True
+        if t.get("origen", t.get("contacto","")) != nv:
+            t["origen"] = nv; changed = True
         for f in editable:
-            nv = row[f] or ""
+            nv = row[f] if row[f] is not None else ""
             if str(t.get(f,"")) != str(nv):
-                t[f]=nv; changed=True
-    if changed: save_data(data)
+                t[f] = nv; changed = True
+    if changed:
+        save_data(data)
 
     # ── Fila de totales ──────────────────────────────────────────────────
     # Totales SOLO de movimientos Conciliados (en vista filtrada)
@@ -786,7 +787,14 @@ def _table(per: dict):
 
     with b1:
         if st.button("🔄 Validar movimientos", use_container_width=True, type="secondary"):
-            st.rerun()   # Streamlit recalcula todo al hacer rerun
+            # Recalcular y guardar por si hay edits pendientes del data_editor
+            save_data(data)
+            st.toast(
+                f"✅ Validado — Conciliados: {len(conc_all)} | Pendientes: {len(pend_all)} | "
+                f"Diferencia: {'$0 ✓' if dif_all==0 else fmt(abs(dif_all))}",
+                icon="🔄",
+            )
+            st.rerun()
     with b2:
         lbl_conc = "✅ Conciliar período" if puede_conciliar else f"✅ Conciliar (dif: {fmt(abs(dif_all))})"
         if st.button(lbl_conc, use_container_width=True, type="primary",
