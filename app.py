@@ -625,30 +625,33 @@ def _sidebar():
 
 # ── MÉTRICAS ──────────────────────────────────────────────────────────────────
 def _metrics(per: dict):
-    txs       = per["transactions"]
-    c, a      = totals(txs)
-    sf        = per["saldoInicial"] - c + a
-    conc      = [t for t in txs if t["estado"] == "Conciliado"]
-    pend      = [t for t in txs if t["estado"] == "Pendiente"]
-    mc, ma    = totals(conc)
-    pc, pa    = totals(pend)
-    monto_conc = mc + ma
-    saldo_pend = pc - pa   # diferencia cargo vs abono de pendientes
+    txs  = per["transactions"]
+    conc = [t for t in txs if t["estado"] == "Conciliado"]
+    pend = [t for t in txs if t["estado"] == "Pendiente"]
 
-    # Crédito total incluye saldo inicial
-    credito_total = per["saldoInicial"] + a
-    saldo_pend    = pc - pa   # débito neto pendiente
+    # Totales SOLO de movimientos Conciliados
+    mc, ma       = totals(conc)
+    credito_conc = per["saldoInicial"] + ma   # Crédito = saldo inicial + créditos conciliados
+    dif_conc     = credito_conc - mc
+
+    # Totales pendientes (informativo)
+    pc, pa       = totals(pend)
+    saldo_pend   = pc - pa
+
+    # Saldo real de la cuenta (todos)
+    c_all, a_all = totals(txs)
+    sf = per["saldoInicial"] - c_all + a_all
 
     cols = st.columns(8)
     data_metrics = [
-        ("Saldo Inicial",              fmt(per["saldoInicial"]), None,                           "normal"),
-        ("Total Débito",               fmt(c),                   None,                           "normal"),
-        ("Total Crédito",              fmt(credito_total),       "(incl. saldo inicial)",         "off"),
-        ("Saldo Final",                fmt(sf),                  None,                           "normal"),
-        ("Saldo Pend. por Conciliar",  fmt(abs(saldo_pend)),     f"{'Débito' if saldo_pend>=0 else 'Crédito'} neto", "off"),
-        ("Conciliados Alegra",         len(conc),                None,                           "normal"),
-        ("Monto Conciliado",           fmt(monto_conc),          None,                           "normal"),
-        ("Pendientes",                 len(pend),                None,                           "inverse"),
+        ("Saldo Inicial",             fmt(per["saldoInicial"]), None,                                          "normal"),
+        ("Débito Conciliado",         fmt(mc),                  f"{len(conc)} movimientos",                    "off"),
+        ("Crédito Conciliado",        fmt(credito_conc),        "incl. saldo inicial",                         "off"),
+        ("Saldo Final (real)",        fmt(sf),                  None,                                          "normal"),
+        ("Saldo Pend. por Conciliar", fmt(abs(saldo_pend)),     f"{'Déb' if saldo_pend>=0 else 'Créd'} · {len(pend)} mov.", "off"),
+        ("Diferencia Conciliación",   fmt(abs(dif_conc)),       "Balanceado ✓" if round(dif_conc)==0 else "Por ajustar", "off"),
+        ("Conciliados",               len(conc),                None,                                          "normal"),
+        ("Pendientes",                len(pend),                None,                                          "inverse"),
     ]
     for col, (lbl, val, dlt, dc) in zip(cols, data_metrics):
         with col:
@@ -743,23 +746,21 @@ def _table(per: dict):
     if changed: save_data(data)
 
     # ── Fila de totales ──────────────────────────────────────────────────
-    fc, fa   = totals(txs)
-    credito  = per["saldoInicial"] + fa          # Crédito = saldo inicial + créditos
-    dif      = credito - fc                       # Diferencia = Crédito − Débito
+    # Totales SOLO de movimientos Conciliados (en vista filtrada)
+    conc_vis = [t for t in txs if t["estado"] == "Conciliado"]
+    pend_vis = [t for t in txs if t["estado"] == "Pendiente"]
+    fc, fa   = totals(conc_vis)
+    credito  = per["saldoInicial"] + fa
+    dif      = credito - fc
     dif_abs  = round(abs(dif))
-    # Verde solo cuando la diferencia es exactamente cero (conciliado)
-    # Rojo en cualquier otro caso, independiente del signo
     dif_col  = "#4caf50" if dif_abs == 0 else "#ff5252"
-    # Flecha indica dirección del desequilibrio:
-    # ▲ = más crédito que débito (sobra dinero / falta registrar débitos)
-    # ▼ = más débito que crédito (falta dinero / falta registrar créditos)
     dif_icon = "▲" if dif >= 0 else "▼"
     dif_txt  = "CONCILIADO ✓" if dif_abs == 0 else f"{fmt(dif_abs)}&nbsp;{dif_icon}"
     st.markdown(
         f"""<div style="background:#2c3e50;color:#fff;border-radius:0 0 8px 8px;
                         padding:7px 14px;font-size:.82rem;font-weight:700;
                         display:flex;gap:32px;align-items:center;margin-top:2px;">
-              <span>TOTAL &nbsp;({len(txs)} mov.)</span>
+              <span>TOTAL CONCILIADOS&nbsp;({len(conc_vis)} de {len(txs)} mov.)</span>
               <span>Débito:&nbsp;<span style='color:#ff9999'>{fmt(fc)}</span></span>
               <span>Crédito:&nbsp;<span style='color:#90ee90'>{fmt(credito)}</span>
                 <span style='font-size:.68rem;opacity:.7'>&nbsp;(incl. saldo inicial)</span>
@@ -767,26 +768,38 @@ def _table(per: dict):
               <span>Diferencia:&nbsp;
                 <strong style='color:{dif_col};font-size:.95rem'>{dif_txt}</strong>
               </span>
+              <span style='opacity:.7;font-size:.72rem'>{len(pend_vis)} pendientes sin contar</span>
             </div>""",
         unsafe_allow_html=True,
     )
 
     # ── Barra de acciones ────────────────────────────────────────────────
     st.markdown("")
-    b1, b2, b3, _ = st.columns([1.6, 1.4, 1.4, 4])
+    b1, b2, b3, b4, _ = st.columns([1.6, 1.6, 1.4, 1.4, 2])
+
+    # Conciliar: solo habilitado cuando diferencia = 0
+    conc_all = [t for t in per["transactions"] if t["estado"] == "Conciliado"]
+    pend_all = [t for t in per["transactions"] if t["estado"] == "Pendiente"]
+    fc_all, fa_all = totals(conc_all)
+    dif_all = round(per["saldoInicial"] + fa_all - fc_all)
+    puede_conciliar = (dif_all == 0 and len(pend_all) > 0)
+
     with b1:
-        pendientes = [t for t in per["transactions"] if t["estado"] == "Pendiente"]
-        label_conc = f"✅ Conciliar ({len(pendientes)} pendientes)"
-        if st.button(label_conc, use_container_width=True, type="primary",
-                     disabled=len(pendientes) == 0):
+        if st.button("🔄 Validar movimientos", use_container_width=True, type="secondary"):
+            st.rerun()   # Streamlit recalcula todo al hacer rerun
+    with b2:
+        lbl_conc = "✅ Conciliar período" if puede_conciliar else f"✅ Conciliar (dif: {fmt(abs(dif_all))})"
+        if st.button(lbl_conc, use_container_width=True, type="primary",
+                     disabled=not puede_conciliar,
+                     help="Solo disponible cuando Débito = Crédito (diferencia = 0)"):
             st.session_state.dialog = "conciliar"
             st.rerun()
-    with b2:
+    with b3:
         if st.button("＋ Agregar movimiento", use_container_width=True):
             st.session_state.dialog     = "tx"
             st.session_state.edit_tx_id = None
             st.rerun()
-    with b3:
+    with b4:
         if st.button("🗑 Eliminar movimiento", use_container_width=True):
             st.session_state.dialog = "eliminar_tx"
             st.rerun()
@@ -837,36 +850,41 @@ def _table(per: dict):
 
 
 # ── DIÁLOGOS ─────────────────────────────────────────────────────────────────
-@st.dialog("Conciliar movimientos pendientes", width="large")
+@st.dialog("Conciliar período", width="large")
 def _dlg_conciliar():
     data = st.session_state.data
     per  = cur_per(data)
-    pendientes = [t for t in per["transactions"] if t["estado"] == "Pendiente"]
 
-    if not pendientes:
-        st.info("No hay movimientos pendientes.")
-        if st.button("Cerrar"): st.session_state.dialog = None; st.rerun()
-        return
+    conc = [t for t in per["transactions"] if t["estado"] == "Conciliado"]
+    pend = [t for t in per["transactions"] if t["estado"] == "Pendiente"]
+    mc, ma   = totals(conc)
+    credito  = per["saldoInicial"] + ma
+    dif      = round(credito - mc)
 
-    st.markdown(f"Se conciliarán **{len(pendientes)}** movimientos pendientes:")
-    df_p = pd.DataFrame([{
-        "Fecha":       t["fecha"],
-        "Descripción": t["descripcion"][:50],
-        "Débito ($)":  fmt(t["monto"]) if t["tipo"] == "cargo" else "—",
-        "Crédito ($)": fmt(t["monto"]) if t["tipo"] == "abono" else "—",
-        "Concepto":    t.get("concepto",""),
-    } for t in pendientes])
-    st.dataframe(df_p, hide_index=True, use_container_width=True)
+    st.success(f"✅ La conciliación está **balanceada** — Débito = Crédito = **{fmt(mc)}**")
 
-    c_tot, a_tot = totals(pendientes)
-    st.caption(f"Total cargos a conciliar: **{fmt(c_tot)}** · Total abonos: **{fmt(a_tot)}**")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Débito conciliado",  fmt(mc))
+    c2.metric("Crédito conciliado", fmt(credito), "incl. saldo inicial")
+    c3.metric("Diferencia",         fmt(dif), "Balanceado ✓" if dif==0 else "Error")
+
+    if pend:
+        st.warning(f"Quedan **{len(pend)}** movimientos en estado **Pendiente** sin conciliar.")
+        df_p = pd.DataFrame([{
+            "Fecha": t["fecha"], "Descripción": t["descripcion"][:45],
+            "Débito ($)":  fmt(t["monto"]) if t["tipo"]=="cargo" else "—",
+            "Crédito ($)": fmt(t["monto"]) if t["tipo"]=="abono" else "—",
+        } for t in pend])
+        st.dataframe(df_p, hide_index=True, use_container_width=True)
+
+    st.markdown("Al confirmar se cerrará la conciliación del período y los movimientos pendientes quedarán marcados como **Conciliado**.")
 
     ok_col, cancel_col = st.columns(2)
     with cancel_col:
         if st.button("Cancelar", use_container_width=True):
             st.session_state.dialog = None; st.rerun()
     with ok_col:
-        if st.button("✅ Confirmar conciliación", type="primary", use_container_width=True):
+        if st.button("✅ Confirmar y cerrar conciliación", type="primary", use_container_width=True):
             for t in per["transactions"]:
                 if t["estado"] == "Pendiente":
                     t["estado"] = "Conciliado"
