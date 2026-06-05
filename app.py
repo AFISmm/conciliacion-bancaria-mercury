@@ -728,28 +728,32 @@ def _table(per: dict):
         hide_index=True, use_container_width=True, num_rows="fixed", key="tx_tbl",
     )
 
-    # Guardar edits inline (incluye Estado ahora editable)
+    # ── Guardar edits inline ─────────────────────────────────────────────
+    # Usamos row["id"] directamente (no iloc) para mapear sin error de índice
     editable = ["concepto","cuenta","cuentaRef","nota","estado"]
-    id_map   = {t["id"]:t for t in per["transactions"]}
+    id_map   = {t["id"]: t for t in per["transactions"]}
     changed  = False
-    for i, row in edited.iterrows():
-        tid = df_v.iloc[i]["id"]; t = id_map.get(tid)
-        if not t: continue
+    for _, row in edited.iterrows():
+        tid = row.get("id")
+        if tid is None or tid not in id_map:
+            continue
+        t = id_map[tid]
         # Origen/Destino
-        nv = row["Origen/Destino"] or ""
-        if t.get("origen", t.get("contacto","")) != nv:
-            t["origen"] = nv; changed = True
+        nv_od = str(row.get("Origen/Destino") or "")
+        if t.get("origen", t.get("contacto","")) != nv_od:
+            t["origen"] = nv_od; changed = True
         for f in editable:
-            nv = row[f] if row[f] is not None else ""
-            if str(t.get(f,"")) != str(nv):
+            nv = str(row.get(f) or "")
+            if str(t.get(f,"")) != nv:
                 t[f] = nv; changed = True
     if changed:
         save_data(data)
 
     # ── Fila de totales ──────────────────────────────────────────────────
-    # Totales SOLO de movimientos Conciliados (en vista filtrada)
-    conc_vis = [t for t in txs if t["estado"] == "Conciliado"]
-    pend_vis = [t for t in txs if t["estado"] == "Pendiente"]
+    # Recalcular SIEMPRE desde per["transactions"] (ya actualizados arriba)
+    all_txs_now = per["transactions"]
+    conc_vis = [t for t in all_txs_now if t["estado"] == "Conciliado"]
+    pend_vis = [t for t in all_txs_now if t["estado"] == "Pendiente"]
     fc, fa   = totals(conc_vis)
     credito  = per["saldoInicial"] + fa
     dif      = credito - fc
@@ -787,12 +791,21 @@ def _table(per: dict):
 
     with b1:
         if st.button("🔄 Validar movimientos", use_container_width=True, type="secondary"):
-            # Recalcular y guardar por si hay edits pendientes del data_editor
+            # Guardar el estado actual y limpiar el caché del data_editor
             save_data(data)
+            # Recargar desde archivo para asegurar estado fresco
+            fresh = load_data()
+            st.session_state.data = fresh
+            conc_f = [t for co in fresh["companies"].values()
+                      for p in co["periods"].values()
+                      for t in p["transactions"] if t["estado"] == "Conciliado"]
+            pend_f = [t for co in fresh["companies"].values()
+                      for p in co["periods"].values()
+                      for t in p["transactions"] if t["estado"] == "Pendiente"]
             st.toast(
-                f"✅ Validado — Conciliados: {len(conc_all)} | Pendientes: {len(pend_all)} | "
-                f"Diferencia: {'$0 ✓' if dif_all==0 else fmt(abs(dif_all))}",
-                icon="🔄",
+                f"Validado — Conciliados: {len(conc_f)} · Pendientes: {len(pend_f)} · "
+                f"Diferencia: {'$0 ✓' if dif_all == 0 else fmt(abs(dif_all))}",
+                icon="✅",
             )
             st.rerun()
     with b2:
