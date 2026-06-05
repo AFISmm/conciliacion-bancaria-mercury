@@ -311,6 +311,7 @@ def _init():
     if "email_sent"       not in ss: ss.email_sent       = False
     if "unverified_email" not in ss: ss.unverified_email = ""
     if "confirm_del_id"   not in ss: ss.confirm_del_id   = None
+    if "company_selected" not in ss: ss.company_selected = False
 
 
 # ── IMPORT ────────────────────────────────────────────────────────────────────
@@ -451,9 +452,10 @@ def _auth_page():
             if sub:
                 ok, err = _auth.authenticate(data, email, password)
                 if ok:
-                    st.session_state.logged_in    = True
-                    st.session_state.current_user = email.strip().lower()
+                    st.session_state.logged_in       = True
+                    st.session_state.current_user    = email.strip().lower()
                     st.session_state.unverified_email = ""
+                    st.session_state.company_selected = False
                     save_data(data); st.rerun()
                 elif "pendiente" in err:
                     st.session_state.unverified_email = email.strip().lower()
@@ -540,21 +542,21 @@ def _sidebar():
     uname   = users.get(ss.current_user,{}).get("name","") or ss.current_user
     st.sidebar.markdown(f"### 🏦 Mercury Methods\n👤 **{uname}**")
     if st.sidebar.button("Cerrar sesión", use_container_width=True):
-        ss.logged_in=False; ss.current_user=None; st.rerun()
+        ss.logged_in=False; ss.current_user=None; ss.company_selected=False; st.rerun()
     st.sidebar.divider()
 
     # ── Empresas ────────────────────────────────────────────────────────
     st.sidebar.markdown("### 🏢 Empresas")
     cur_co_id = data.get("currentCompanyId","")
     for co in COMPANIES:
-        is_active = co["id"] == cur_co_id
+        is_active = co["id"] == cur_co_id and ss.company_selected
         label = f"{'▶ ' if is_active else ''}{co['name']}"
         if st.sidebar.button(label, use_container_width=True,
                               type="primary" if is_active else "secondary",
                               key=f"co_{co['id']}"):
-            if co["id"] != cur_co_id:
-                data["currentCompanyId"] = co["id"]
-                save_data(data); st.rerun()
+            data["currentCompanyId"] = co["id"]
+            ss.company_selected = True
+            save_data(data); st.rerun()
     st.sidebar.divider()
 
     # ── Período ─────────────────────────────────────────────────────────
@@ -775,59 +777,53 @@ def _table(per: dict):
         if c2.button("Cancelar"):
             st.session_state.confirm_del_id = None; st.rerun()
 
-    # ── Exportar (pie de tabla) ──────────────────────────────────────────
+    # ── Importar / Exportar (pie de tabla) ──────────────────────────────
     st.markdown("---")
-    st.markdown("**Exportar:**")
-    e1,e2,e3,_ = st.columns([1,1,1,5])
     today = date.today().isoformat()
-    with e1:
-        st.download_button("⬇️ CSV", _export_csv(txs),
-            f"conciliacion_{today}.csv","text/csv", use_container_width=True)
-    with e2:
-        st.download_button("⬇️ Excel", _export_excel(txs),
-            f"conciliacion_{today}.xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True)
-    with e3:
-        pdf_bytes = _export_pdf(txs, per)
-        st.download_button("⬇️ PDF", pdf_bytes,
-            f"conciliacion_{today}.pdf","application/pdf", use_container_width=True)
+
+    imp_col, exp_col = st.columns([1, 1])
+
+    with imp_col:
+        st.markdown("**⬆️ Importar extracto**")
+        i1, i2, i3 = st.columns(3)
+        with i1:
+            csv_f = st.file_uploader("CSV", type=["csv","txt"], key="up_csv_tbl")
+            if csv_f:
+                raw = csv_f.read().decode("utf-8", errors="replace")
+                new_txs, bad = _parse_csv(raw, ",")
+                if st.button(f"Confirmar {len(new_txs)} filas", key="ok_csv"):
+                    per["transactions"].extend(new_txs); save_data(data); st.rerun()
+        with i2:
+            xls_f = st.file_uploader("Excel", type=["xlsx","xls"], key="up_xls_tbl")
+            if xls_f:
+                new_txs, bad = _parse_excel(xls_f.read())
+                if st.button(f"Confirmar {len(new_txs)} filas", key="ok_xls"):
+                    per["transactions"].extend(new_txs); save_data(data); st.rerun()
+        with i3:
+            pdf_f = st.file_uploader("PDF", type=["pdf"], key="up_pdf_tbl")
+            if pdf_f:
+                new_txs, bad = _parse_pdf(pdf_f.read())
+                st.caption(f"{len(new_txs)} detectadas, {bad} errores")
+                if new_txs and st.button(f"Confirmar {len(new_txs)} filas", key="ok_pdf"):
+                    per["transactions"].extend(new_txs); save_data(data); st.rerun()
+
+    with exp_col:
+        st.markdown("**⬇️ Exportar**")
+        e1, e2, e3 = st.columns(3)
+        with e1:
+            st.download_button("CSV", _export_csv(txs),
+                f"conciliacion_{today}.csv", "text/csv", use_container_width=True)
+        with e2:
+            st.download_button("Excel", _export_excel(txs),
+                f"conciliacion_{today}.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True)
+        with e3:
+            st.download_button("PDF", _export_pdf(txs, per),
+                f"conciliacion_{today}.pdf", "application/pdf", use_container_width=True)
 
 
-# ── IMPORTAR ──────────────────────────────────────────────────────────────────
-def _import_section(per: dict):
-    data = st.session_state.data
-    st.markdown("**Importar extracto:**")
-    i1,i2,i3 = st.columns(3)
-
-    with i1:
-        csv_f = st.file_uploader("CSV", type=["csv","txt"], key="up_csv", label_visibility="collapsed")
-        if csv_f:
-            sep_c = st.radio("Sep.",["Coma","Punto y coma","Tab"],horizontal=True,key="sep_c")
-            sep   = {",":"Coma",";":"Punto y coma","\t":"Tab"}
-            sep_r = [k for k,v in sep.items() if v==sep_c][0]
-            raw   = csv_f.read().decode("utf-8",errors="replace")
-            txs,bad = _parse_csv(raw,sep_r)
-            if txs and st.button(f"Importar {len(txs)} filas CSV"):
-                per["transactions"].extend(txs); save_data(data)
-                st.success(f"✅ {len(txs)} importados" + (f" ({bad} errores)" if bad else "")); st.rerun()
-
-    with i2:
-        xls_f = st.file_uploader("Excel", type=["xlsx","xls"], key="up_xls", label_visibility="collapsed")
-        if xls_f:
-            txs,bad = _parse_excel(xls_f.read())
-            if txs and st.button(f"Importar {len(txs)} filas Excel"):
-                per["transactions"].extend(txs); save_data(data)
-                st.success(f"✅ {len(txs)} importados"); st.rerun()
-
-    with i3:
-        pdf_f = st.file_uploader("PDF", type=["pdf"], key="up_pdf", label_visibility="collapsed")
-        if pdf_f:
-            txs,bad = _parse_pdf(pdf_f.read())
-            st.caption(f"PDF: {len(txs)} filas detectadas, {bad} con error")
-            if txs and st.button(f"Importar {len(txs)} filas PDF"):
-                per["transactions"].extend(txs); save_data(data)
-                st.success(f"✅ {len(txs)} importados"); st.rerun()
+# _import_section eliminada — import integrado en pie de _table()
 
 
 # ── DIÁLOGOS ─────────────────────────────────────────────────────────────────
@@ -942,8 +938,26 @@ def main():
     _sidebar()
 
     data = st.session_state.data
-    co   = cur_co(data)
-    per  = cur_per(data)
+
+    # ── Pantalla de bienvenida (ninguna empresa seleccionada) ─────────────
+    if not st.session_state.company_selected:
+        st.markdown("""
+        <div style="display:flex;flex-direction:column;align-items:center;
+                    justify-content:center;height:65vh;text-align:center;">
+            <div style="font-size:3.5rem;margin-bottom:16px;">🏦</div>
+            <h1 style="font-size:2.4rem;font-weight:800;color:#2c3e50;
+                       letter-spacing:2px;margin-bottom:12px;">
+                PORTAL DE CONCILIACIONES
+            </h1>
+            <p style="font-size:1rem;color:#757575;max-width:360px;line-height:1.6;">
+                Seleccione una empresa en el panel izquierdo para comenzar
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+
+    co  = cur_co(data)
+    per = cur_per(data)
 
     # Diálogos
     dlg = st.session_state.dialog
@@ -962,10 +976,10 @@ def main():
             return
 
     if not co:
-        st.error("Seleccione una empresa en el panel lateral."); return
+        st.info("Seleccione una empresa en el panel lateral."); return
 
     # Header
-    co_name = co.get("name","")
+    co_name  = co.get("name","")
     per_info = f"{per.get('nombre','')} | Cta: {per.get('cuenta','–')} | {per.get('banco','')}" if per else "Sin período"
     st.markdown(
         f'<div style="background:#2c3e50;color:#fff;padding:12px 20px;border-radius:8px;'
@@ -975,7 +989,7 @@ def main():
         unsafe_allow_html=True)
 
     if not per:
-        st.info("Este período no tiene datos. Cree un período en el panel lateral.")
+        st.info("Sin períodos. Use ➕ Nuevo en el panel lateral para crear el primero.")
         return
 
     # Métricas
@@ -983,17 +997,13 @@ def main():
     st.markdown("")
 
     # Tabs
-    tab_mov, tab_per, tab_import, tab_alegra = st.tabs(
-        ["📊 Movimientos", "📅 Período y Filtros", "⬆️ Importar", "🔗 Alegra"])
+    tab_mov, tab_per, tab_alegra = st.tabs(["📊 Movimientos", "📅 Período y Filtros", "🔗 Alegra"])
 
     with tab_mov:
         _table(per)
 
     with tab_per:
         _period_filters(per)
-
-    with tab_import:
-        _import_section(per)
 
     with tab_alegra:
         _alegra_panel()
